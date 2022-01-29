@@ -5,6 +5,7 @@
 #include "core/providers/shared_library/provider_host_api.h"
 
 #include "core/providers/shared/common.h"
+#include "core/framework/inlined_containers.h"
 
 #define PROVIDER_DISALLOW_ALL(TypeName)     \
   TypeName() = delete;                      \
@@ -172,10 +173,10 @@ struct ProviderHost {
   virtual bool RocmCall_true(int retCode, const char* exprString, const char* libName, int successCode, const char* msg) = 0;
 #endif
 
-  virtual std::unordered_set<NodeIndex> GetCpuPreferredNodes(const onnxruntime::GraphViewer& graph,
-                                                             const std::string& provider_type,
-                                                             const std::vector<const KernelRegistry*>& kernel_registries,
-                                                             const std::vector<NodeIndex>& tentative_nodes) = 0;
+  virtual InlinedHashSet<NodeIndex> GetCpuPreferredNodes(const onnxruntime::GraphViewer& graph,
+                                                         const std::string& provider_type,
+                                                         const gsl::span<const KernelRegistry* const>& kernel_registries,
+                                                         const gsl::span<const NodeIndex>& tentative_nodes) = 0;
 
   virtual Status UnpackTensor(const ONNX_NAMESPACE::TensorProto& tensor, const void* raw_data, size_t raw_data_len, /*out*/ bool* p_data, size_t expected_size) = 0;
   virtual Status UnpackTensor(const ONNX_NAMESPACE::TensorProto& tensor, const void* raw_data, size_t raw_data_len, /*out*/ float* p_data, size_t expected_size) = 0;
