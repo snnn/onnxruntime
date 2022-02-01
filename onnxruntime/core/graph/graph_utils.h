@@ -12,6 +12,8 @@
 #include "onnx/onnx-operators_pb.h"
 #include "core/graph/graph.h"
 
+#include "core/framework/inlined_containers.h"
+
 namespace onnxruntime {
 
 namespace graph_utils {
@@ -45,8 +47,8 @@ bool IsSupportedOptypeVersionAndDomain(const Node& node,
                                        const char* domain = kOnnxDomainAlias);
 
 /** Checks if the node has the same operator since version as the given one. */
-bool MatchesOpSinceVersion(const Node& node, const std::initializer_list<ONNX_NAMESPACE::OperatorSetVersion>& versions);
-bool MatchesOpSinceVersion(const Node& node, const std::vector<ONNX_NAMESPACE::OperatorSetVersion>& versions);
+bool MatchesOpSinceVersion(const Node& node, std::initializer_list<ONNX_NAMESPACE::OperatorSetVersion> versions);
+bool MatchesOpSinceVersion(const Node& node, const gsl::span<const ONNX_NAMESPACE::OperatorSetVersion>& versions);
 
 /** Checks if the node has the same op set domain as the given one. */
 bool MatchesOpSetDomain(const Node& node, const std::string& domain);
@@ -54,7 +56,7 @@ bool MatchesOpSetDomain(const Node& node, const std::string& domain);
 /** Returns true if the execution provider assigned to current node is present in the compatible providers list
     or if the compatible_providers list is empty. */
 bool IsSupportedProvider(const Node& node,
-                         const std::unordered_set<std::string>& compatible_providers);
+                         const InlinedHashSet<std::string>& compatible_providers);
 
 /** Checks if the output at the specified index is input to downstream Nodes. */
 bool IsOutputUsed(const Node& node, int index);
@@ -78,7 +80,7 @@ bool NodeArgIsConstant(const Graph& graph, const NodeArg& node_arg);
 /** Checks if the given node has only constant inputs (initializers) and no input is in excluded_initializers.
 If so returns them in constant_inputs as they may come from outer scope. */
 bool AllNodeInputsAreConstant(const Graph& graph, const Node& node, InitializedTensorSet& constant_inputs,
-                              const std::unordered_set<std::string>& excluded_initializers = {});
+                              const InlinedHashSet<std::string>& excluded_initializers = {});
 
 /** Gets the index of an input arg with the specified input arg name. */
 int GetNodeInputIndexFromInputName(const Node& node, const std::string& input_name);
@@ -233,7 +235,7 @@ struct EdgeEndToMatch {
   std::string op_type;
 
   // Expected version of the operator of node in the edge end.
-  std::vector<ONNX_NAMESPACE::OperatorSetVersion> versions;
+  InlinedVector<ONNX_NAMESPACE::OperatorSetVersion> versions;
 
   // Expected domain of the operator of node in the edge end.
   std::string domain;
@@ -261,7 +263,7 @@ struct EdgeEndToMatch {
     It is recommended to match path from bottom to top direction to avoid such issue.
     It is because each node input (dst_arg_index) only accepts one input edge.
 */
-bool FindPath(const Node& node, bool is_input_edge, const std::vector<EdgeEndToMatch>& edges_to_match, std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger);
+bool FindPath(const Node& node, bool is_input_edge, const gsl::span<const EdgeEndToMatch>& edges_to_match, std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger);
 
 /** Same as FindPath above, but return the references of matched Node
 */

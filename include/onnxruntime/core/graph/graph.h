@@ -865,8 +865,8 @@ class Graph {
   Node& AddNode(const std::string& name,
                 const std::string& op_type,
                 const std::string& description,
-                const std::vector<NodeArg*>& input_args,
-                const std::vector<NodeArg*>& output_args,
+                const gsl::span<NodeArg* const>& input_args,
+                const gsl::span<NodeArg* const>& output_args,
                 const NodeAttributes* attributes = nullptr,
                 const std::string& domain = "");
 

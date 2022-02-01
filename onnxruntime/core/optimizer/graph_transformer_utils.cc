@@ -60,8 +60,8 @@
 
 namespace onnxruntime::optimizer_utils {
 
-static void FilterTransformers(std::vector<std::unique_ptr<GraphTransformer>>& transformers,
-                               const std::unordered_set<std::string>& transformers_to_disable) {
+static void FilterTransformers(InlinedVector<std::unique_ptr<GraphTransformer>>& transformers,
+                               const InlinedHashSet<std::string>& transformers_to_disable) {
   if (transformers_to_disable.empty()) return;
 
   transformers.erase(
@@ -79,10 +79,10 @@ std::string GenerateRuleBasedTransformerName(TransformerLevel level) {
   return "Level" + std::to_string(static_cast<uint32_t>(level)) + "_RuleBasedTransformer";
 }
 
-std::vector<std::unique_ptr<RewriteRule>> GenerateRewriteRules(
+InlinedVector<std::unique_ptr<RewriteRule>> GenerateRewriteRules(
     TransformerLevel level,
-    const std::unordered_set<std::string>& rules_to_disable) {
-  std::vector<std::unique_ptr<RewriteRule>> rules;
+    const InlinedHashSet<std::string>& rules_to_disable) {
+  InlinedVector<std::unique_ptr<RewriteRule>> rules;
   switch (level) {
     case TransformerLevel::Level1:
       rules.push_back(std::make_unique<EliminateIdentity>());
@@ -118,7 +118,7 @@ std::vector<std::unique_ptr<RewriteRule>> GenerateRewriteRules(
   if (rules_to_disable.empty()) {
     return rules;
   } else {
-    std::vector<std::unique_ptr<RewriteRule>> filtered_list;
+    InlinedVector<std::unique_ptr<RewriteRule>> filtered_list;
     const auto end = rules_to_disable.cend();
     std::for_each(rules.begin(), rules.end(),
                   [&](std::unique_ptr<RewriteRule>& item) {
@@ -133,8 +133,8 @@ std::vector<std::unique_ptr<RewriteRule>> GenerateRewriteRules(
 
 std::unique_ptr<RuleBasedGraphTransformer> GenerateRuleBasedGraphTransformer(
     TransformerLevel level,
-    const std::unordered_set<std::string>& rules_to_disable,
-    const std::unordered_set<std::string>& compatible_execution_providers) {
+    const InlinedHashSet<std::string>& rules_to_disable,
+    const InlinedHashSet<std::string>& compatible_execution_providers) {
   auto rewrite_rules_to_register = GenerateRewriteRules(level, rules_to_disable);
   if (rewrite_rules_to_register.empty()) {
     return nullptr;
@@ -150,12 +150,12 @@ std::unique_ptr<RuleBasedGraphTransformer> GenerateRuleBasedGraphTransformer(
   return rule_transformer;
 }
 
-std::vector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
+InlinedVector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
     TransformerLevel level,
     const SessionOptions& session_options,
     const IExecutionProvider& cpu_execution_provider, /*required by constant folding*/
-    const std::unordered_set<std::string>& rules_and_transformers_to_disable) {
-  std::vector<std::unique_ptr<GraphTransformer>> transformers;
+    const InlinedHashSet<std::string>& rules_and_transformers_to_disable) {
+  InlinedVector<std::unique_ptr<GraphTransformer>> transformers;
   const bool disable_quant_qdq =
       session_options.config_options.GetConfigOrDefault(kOrtSessionOptionsDisableQuantQDQ, "0") == "1";
 #ifndef DISABLE_CONTRIB_OPS
@@ -263,15 +263,15 @@ std::vector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
 
 #if !defined(ORT_MINIMAL_BUILD) || defined(ORT_ENABLE_RUNTIME_OPTIMIZATION_IN_MINIMAL_BUILD)
 
-std::vector<std::unique_ptr<GraphTransformer>> GenerateTransformersForRuntimeOptimizations(
+InlinedVector<std::unique_ptr<GraphTransformer>> GenerateTransformersForRuntimeOptimizations(
     TransformerLevel level,
     const SessionOptions& session_options,
     const SatApplyContextVariant& apply_context,
-    const std::unordered_set<std::string>& rules_and_transformers_to_disable) {
+    const InlinedHashSet<std::string>& rules_and_transformers_to_disable) {
   const bool disable_quant_qdq =
       session_options.config_options.GetConfigOrDefault(kOrtSessionOptionsDisableQuantQDQ, "0") == "1";
 
-  std::vector<std::unique_ptr<GraphTransformer>> transformers;
+  InlinedVector<std::unique_ptr<GraphTransformer>> transformers;
 
   switch (level) {
     case TransformerLevel::Level1:
