@@ -56,7 +56,7 @@ bool MatchesOpSetDomain(const Node& node, const std::string& domain);
 /** Returns true if the execution provider assigned to current node is present in the compatible providers list
     or if the compatible_providers list is empty. */
 bool IsSupportedProvider(const Node& node,
-                         const InlinedHashSet<std::string>& compatible_providers);
+                         const InlinedHashSet<std::string_view>& compatible_providers);
 
 /** Checks if the output at the specified index is input to downstream Nodes. */
 bool IsOutputUsed(const Node& node, int index);
@@ -194,7 +194,7 @@ void FinalizeNodeFusion(Graph& graph, Node& first_node, Node& second_node);
     The output definitions and edges from the last node in 'nodes' will be moved to replacement_node.
     All nodes in 'nodes' will be removed.
 */
-void FinalizeNodeFusion(Graph& graph, const std::vector<std::reference_wrapper<Node>>& nodes, Node& replacement_node);
+void FinalizeNodeFusion(Graph& graph, const gsl::span<const std::reference_wrapper<Node>>& nodes, Node& replacement_node);
 
 /** Finalize the fusion of two or more nodes which are being replaced with two or more nodes.
     The first and last entries in 'nodes' are assumed to be the first and last nodes in a chain of nodes being fused.
@@ -207,7 +207,7 @@ void FinalizeNodeFusion(Graph& graph, const std::vector<std::reference_wrapper<N
     All nodes in 'nodes' will be removed.
 */
 void FinalizeNodeFusion(Graph& graph,
-                        const std::vector<std::reference_wrapper<Node>>& nodes,
+                        const gsl::span<const std::reference_wrapper<Node>>& nodes,
                         Node& replacement_node_start,
                         Node& replacement_node_end);
 
@@ -265,9 +265,17 @@ struct EdgeEndToMatch {
 */
 bool FindPath(const Node& node, bool is_input_edge, const gsl::span<const EdgeEndToMatch>& edges_to_match, std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger);
 
+bool FindPath(const Node& node, bool is_input_edge, std::initializer_list<EdgeEndToMatch> edges_to_match, std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger) {
+  return FindPath(node, is_input_edge, gsl::make_span(edges_to_match.begin(), edges_to_match.end()), result, logger);
+}
+
 /** Same as FindPath above, but return the references of matched Node
 */
-bool FindPath(Graph& graph, const Node& node, bool is_input_edge, const std::vector<EdgeEndToMatch>& edges_to_match, std::vector<std::reference_wrapper<Node>>& result, const logging::Logger& logger);
+bool FindPath(Graph& graph, const Node& node, bool is_input_edge, const gsl::span<const EdgeEndToMatch>& edges_to_match, std::vector<std::reference_wrapper<Node>>& result, const logging::Logger& logger);
+
+bool FindPath(Graph& graph, const Node& node, bool is_input_edge, std::initializer_list<EdgeEndToMatch> edges_to_match, std::vector<std::reference_wrapper<Node>>& result, const logging::Logger& logger) {
+  return FindPath(graph, node, is_input_edge, gsl::make_span(edges_to_match.begin(), edges_to_match.end()), result, logger);
+}
 
 /**
  * Remove nodes with only one output edge using bottom-up bfs traversal.

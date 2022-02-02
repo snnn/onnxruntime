@@ -66,9 +66,9 @@ static void FilterTransformers(InlinedVector<std::unique_ptr<GraphTransformer>>&
 
   transformers.erase(
       std::remove_if(transformers.begin(), transformers.end(),
-                     [&](const std::unique_ptr<GraphTransformer>& transformer) {
+                     [&, transformers_to_disable_end = transformers_to_disable.end()](const std::unique_ptr<GraphTransformer>& transformer) {
                        return !transformer ||
-                              transformers_to_disable.find(transformer->Name()) != transformers_to_disable.end();
+                              transformers_to_disable.find(transformer->Name()) != transformers_to_disable_end;
                      }),
       transformers.end());
 }
@@ -185,19 +185,19 @@ InlinedVector<std::unique_ptr<GraphTransformer>> GenerateTransformers(
     } break;
 
     case TransformerLevel::Level2: {
-      std::unordered_set<std::string> cpu_ep = {onnxruntime::kCpuExecutionProvider};
+      const InlinedHashSet<std::string_view> cpu_ep = {onnxruntime::kCpuExecutionProvider};
 
 #ifndef DISABLE_CONTRIB_OPS
-      const std::unordered_set<std::string> cuda_rocm_eps = {onnxruntime::kCudaExecutionProvider,
-                                                             onnxruntime::kRocmExecutionProvider};
-      const std::unordered_set<std::string> cpu_cuda_rocm_eps = {onnxruntime::kCpuExecutionProvider,
-                                                                 onnxruntime::kCudaExecutionProvider,
-                                                                 onnxruntime::kRocmExecutionProvider};
-      const std::unordered_set<std::string> cpu_cuda_rocm_acl_armnn_eps = {onnxruntime::kCpuExecutionProvider,
-                                                                           onnxruntime::kCudaExecutionProvider,
-                                                                           onnxruntime::kRocmExecutionProvider,
-                                                                           onnxruntime::kAclExecutionProvider,
-                                                                           onnxruntime::kArmNNExecutionProvider};
+      const InlinedHashSet<std::string_view> cuda_rocm_eps = {onnxruntime::kCudaExecutionProvider,
+                                                              onnxruntime::kRocmExecutionProvider};
+      const InlinedHashSet<std::string_view> cpu_cuda_rocm_eps = {onnxruntime::kCpuExecutionProvider,
+                                                                  onnxruntime::kCudaExecutionProvider,
+                                                                  onnxruntime::kRocmExecutionProvider};
+      const InlinedHashSet<std::string_view> cpu_cuda_rocm_acl_armnn_eps = {onnxruntime::kCpuExecutionProvider,
+                                                                            onnxruntime::kCudaExecutionProvider,
+                                                                            onnxruntime::kRocmExecutionProvider,
+                                                                            onnxruntime::kAclExecutionProvider,
+                                                                            onnxruntime::kArmNNExecutionProvider};
 
       if (!disable_quant_qdq) {
         if (!QDQIsInt8Allowed()) {

@@ -24,7 +24,7 @@ class ConstantFolding : public GraphTransformer {
   */
   ConstantFolding(const IExecutionProvider& execution_provider,
                   bool skip_dequantize_linear,
-                  const InlinedHashSet<std::string>& compatible_execution_providers = {},
+                  const InlinedHashSet<std::string_view>& compatible_execution_providers = {},
                   const InlinedHashSet<std::string>& excluded_initializers = {}) noexcept;
 
  private:

@@ -19,7 +19,7 @@ The interface for in-place transformation of a Graph.
 class GraphTransformer {
  public:
   GraphTransformer(const std::string& name,
-      const InlinedHashSet<std::string>& compatible_execution_providers = {}) noexcept
+      const InlinedHashSet<std::string_view>& compatible_execution_providers = {}) noexcept
       : name_(name), compatible_provider_types_(compatible_execution_providers) {
   }
 
@@ -30,7 +30,7 @@ class GraphTransformer {
     return name_;
   }
 
-  const InlinedHashSet<std::string>& GetCompatibleExecutionProviders() const noexcept {
+  const InlinedHashSet<std::string_view>& GetCompatibleExecutionProviders() const noexcept {
     return compatible_provider_types_;
   }
 
@@ -68,6 +68,6 @@ class GraphTransformer {
       const = 0;
 
   const std::string name_;
-  const InlinedHashSet<std::string> compatible_provider_types_;
+  const InlinedHashSet<std::string_view> compatible_provider_types_;
 };
 }  // namespace onnxruntime

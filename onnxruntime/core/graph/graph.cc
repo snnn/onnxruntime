@@ -900,19 +900,19 @@ void Node::AddAttribute(const std::string& attr_name, const AttributeProto& valu
     attributes_[attr_name] = a;                                              \
   };
 
-#define ADD_LIST_ATTR_IMPL(type, enumType, field)            \
-  void Node::AddAttribute(const std::string& attr_name,      \
-                          const std::vector<type>& values) { \
-    graph_->SetGraphResolveNeeded();                         \
-    graph_->SetGraphProtoSyncNeeded();                       \
-    AttributeProto a;                                        \
-    a.set_name(attr_name);                                   \
-    a.set_type(enumType);                                    \
-    for (const auto& val : values) {                         \
-      *(a.mutable_##field()->Add()) = val;                   \
-    }                                                        \
-    attributes_[attr_name] = a;                              \
-  };
+#define ADD_LIST_ATTR_IMPL(type, enumType, field)                \
+  void Node::AddAttribute(const std::string& attr_name,          \
+                          const gsl::span<type const>& values) { \
+    graph_->SetGraphResolveNeeded();                             \
+    graph_->SetGraphProtoSyncNeeded();                           \
+    AttributeProto a;                                            \
+    a.set_name(attr_name);                                       \
+    a.set_type(enumType);                                        \
+    for (const auto& val : values) {                             \
+      *(a.mutable_##field()->Add()) = val;                       \
+    }                                                            \
+    attributes_[attr_name] = a;                                  \
+  }
 
 void Node::AddAttribute(const std::string& attr_name, const GraphProto& value) {
   graph_->SetGraphResolveNeeded();

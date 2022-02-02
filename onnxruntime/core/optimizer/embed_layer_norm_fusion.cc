@@ -32,8 +32,8 @@ static NodeArg* CastToInt32(Graph& graph, NodeArg* input, ProviderType provider_
   Node& node = graph.AddNode(graph.GenerateNodeName(input->Name() + "_Cast"),
                              "Cast",
                              "Cast Input from int64 to int32",
-                             {input},
-                             {&cast32},
+                             InlinedVector<NodeArg*>{input},
+                             InlinedVector<NodeArg*>{&cast32},
                              nullptr,
                              kOnnxDomain);
 
@@ -66,7 +66,7 @@ static bool CheckInput(NodeArg* input, const logging::Logger& logger) {
   return true;
 }
 
-static bool IsNeighborNodeExpectedTypes(Node::NodeConstIterator start, const Node::NodeConstIterator end, const std::vector<std::string>& expected_types) {
+static bool IsNeighborNodeExpectedTypes(Node::NodeConstIterator start, const Node::NodeConstIterator end, const gsl::span<const std::string>& expected_types) {
   for (const std::string& expected_type : expected_types) {
     if (start == end || (*start).OpType().compare(expected_type) != 0) {
       return false;
@@ -74,6 +74,10 @@ static bool IsNeighborNodeExpectedTypes(Node::NodeConstIterator start, const Nod
     ++start;
   }
   return start == end;
+}
+
+static bool IsNeighborNodeExpectedTypes(Node::NodeConstIterator start, const Node::NodeConstIterator end, std::initializer_list<std::string> expected_types) {
+  return IsNeighborNodeExpectedTypes(start, end, gsl::make_span(expected_types.begin(), expected_types.end()));
 }
 
 /** Match subgraph like the following:
@@ -513,7 +517,7 @@ static void CreateEmbedLayernormNode(Graph& graph,
                                               "EmbedLayerNormalization",
                                               "fused EmbedLayerNorm subgraphs ",
                                               embed_layer_norm_input_defs,
-                                              {layer_norm_node.MutableOutputDefs()[0], &mask_index},
+                                              InlinedVector<NodeArg*>{layer_norm_node.MutableOutputDefs()[0], &mask_index},
                                               {}, kMSDomain);
 
   // Get attribute "epsilon" from "LayerNormalization" node if available. Else, default value

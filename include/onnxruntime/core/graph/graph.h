@@ -342,7 +342,7 @@ class Node {
 #define ADD_ATTR_INTERFACES(TypeName)                                     \
   void AddAttribute(const std::string& attr_name, const TypeName& value); \
   void AddAttribute(const std::string& attr_name,                         \
-                    const std::vector<TypeName>& values);
+                    const gsl::span<TypeName const>& values);
 
   ADD_ATTR_INTERFACES(int64_t)
   ADD_ATTR_INTERFACES(float)
@@ -353,6 +353,21 @@ class Node {
   ADD_ATTR_INTERFACES(ONNX_NAMESPACE::SparseTensorProto)
 #endif
   ADD_ATTR_INTERFACES(ONNX_NAMESPACE::TypeProto)
+
+  // The below two are made so the compiler does not attempt to resolve
+  // C-strings with a span
+  template <size_t N>
+  void AddAttribute(const std::string& attr_name, const char (&value)[N]) {
+    std::string v(value, N);
+    this->AddAttribute(attr_name, v);
+  }
+
+  template <size_t M, size_t N>
+  void AddAttribute(const char (&name)[M], const char (&value)[N]) {
+    std::string n(name, M);
+    std::string v(value, N);
+    this->AddAttribute(n, v);
+  }
 
   /** Gets the Node's attributes. */
   const NodeAttributes& GetAttributes() const noexcept { return attributes_; }

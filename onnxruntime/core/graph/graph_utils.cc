@@ -246,7 +246,7 @@ bool MatchesOpSetDomain(const Node& node, const std::string& domain) {
 }
 
 bool IsSupportedProvider(const Node& node,
-                         const InlinedHashSet<std::string>& compatible_providers) {
+                         const InlinedHashSet<std::string_view>& compatible_providers) {
   return !(!compatible_providers.empty() &&
            compatible_providers.find(node.GetExecutionProviderType()) == compatible_providers.end());
 }
@@ -544,13 +544,13 @@ void FinalizeNodeFusion(Graph& graph, Node& first_node, Node& second_node) {
   graph.RemoveNode(second_node.Index());
 }
 
-void FinalizeNodeFusion(Graph& graph, const std::vector<std::reference_wrapper<Node>>& nodes, Node& replacement_node) {
+void FinalizeNodeFusion(Graph& graph, const gsl::span<const std::reference_wrapper<Node>>& nodes, Node& replacement_node) {
   FinalizeNodeFusion(graph, nodes, replacement_node, replacement_node);
 }
 
-void FinalizeNodeFusion(Graph& graph, const std::vector<std::reference_wrapper<Node>>& nodes, Node& replacement_node_start,
+void FinalizeNodeFusion(Graph& graph, const gsl::span<const std::reference_wrapper<Node>>& nodes, Node& replacement_node_start,
                         Node& replacement_node_end) {
-  MoveAllNodeInputEdges(graph, nodes.front(), replacement_node_start);
+  MoveAllNodeInputEdges(graph, *nodes.begin(), replacement_node_start);
   MoveAllNodeOutputs(graph, nodes.back(), replacement_node_end);
 
   for (Node& node : nodes) {
