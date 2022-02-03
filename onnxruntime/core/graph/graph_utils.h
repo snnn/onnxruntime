@@ -38,13 +38,9 @@ int GetNodeOutputIndexFromOutputName(const Node& node, const std::string& output
 #if !defined(ORT_MINIMAL_BUILD)
 /** Checks if the operator's type, version, and domain of the given node match the given values. */
 bool IsSupportedOptypeVersionAndDomain(const Node& node,
-                                       const std::string& op_type,
-                                       const std::initializer_list<ONNX_NAMESPACE::OperatorSetVersion>& versions,
-                                       const std::string& domain = kOnnxDomainAlias);
-bool IsSupportedOptypeVersionAndDomain(const Node& node,
-                                       const char* op_type,
-                                       const std::initializer_list<ONNX_NAMESPACE::OperatorSetVersion>& versions,
-                                       const char* domain = kOnnxDomainAlias);
+                                       std::string_view op_type,
+                                       std::initializer_list<ONNX_NAMESPACE::OperatorSetVersion> versions,
+                                       std::string_view domain = kOnnxDomainAlias);
 
 /** Checks if the node has the same operator since version as the given one. */
 bool MatchesOpSinceVersion(const Node& node, std::initializer_list<ONNX_NAMESPACE::OperatorSetVersion> versions);
@@ -184,18 +180,6 @@ void AddNodeInput(Node& target, int target_input_idx, NodeArg& new_input);
 */
 void FinalizeNodeFusion(Graph& graph, Node& first_node, Node& second_node);
 
-/** Finalize the fusion of two or more nodes which are being replaced with a single node.
-    The first and last entries in 'nodes' are assumed to be the first and last nodes in a chain of nodes being fused.
-
-    Conceptually multiple nodes are being combined into one, and post-fusion will produce output/s with the same names
-    as the last node in 'nodes', and be connected to the same downstream nodes.
-
-    The input edges to the first node in 'nodes' will be moved to replacement_node. No other input edges are moved.
-    The output definitions and edges from the last node in 'nodes' will be moved to replacement_node.
-    All nodes in 'nodes' will be removed.
-*/
-void FinalizeNodeFusion(Graph& graph, const gsl::span<const std::reference_wrapper<Node>>& nodes, Node& replacement_node);
-
 /** Finalize the fusion of two or more nodes which are being replaced with two or more nodes.
     The first and last entries in 'nodes' are assumed to be the first and last nodes in a chain of nodes being fused.
 
@@ -210,6 +194,31 @@ void FinalizeNodeFusion(Graph& graph,
                         const gsl::span<const std::reference_wrapper<Node>>& nodes,
                         Node& replacement_node_start,
                         Node& replacement_node_end);
+
+inline void FinalizeNodeFusion(Graph& graph,
+                               std::initializer_list<std::reference_wrapper<Node>> nodes,
+                               Node& replacement_node_start,
+                               Node& replacement_node_end) {
+  FinalizeNodeFusion(graph, gsl::make_span(nodes.begin(), nodes.end()), replacement_node_start, replacement_node_end);
+}
+
+/** Finalize the fusion of two or more nodes which are being replaced with a single node.
+    The first and last entries in 'nodes' are assumed to be the first and last nodes in a chain of nodes being fused.
+
+    Conceptually multiple nodes are being combined into one, and post-fusion will produce output/s with the same names
+    as the last node in 'nodes', and be connected to the same downstream nodes.
+
+    The input edges to the first node in 'nodes' will be moved to replacement_node. No other input edges are moved.
+    The output definitions and edges from the last node in 'nodes' will be moved to replacement_node.
+    All nodes in 'nodes' will be removed.
+*/
+inline void FinalizeNodeFusion(Graph& graph, const gsl::span<const std::reference_wrapper<Node>>& nodes, Node& replacement_node) {
+  FinalizeNodeFusion(graph, nodes, replacement_node, replacement_node);
+}
+
+inline void FinalizeNodeFusion(Graph& graph, std::initializer_list<std::reference_wrapper<Node>> nodes, Node& replacement_node) {
+  FinalizeNodeFusion(graph, gsl::make_span(nodes.begin(), nodes.end()), replacement_node, replacement_node);
+}
 
 /** Find the input edge of a node for a specified input index.
 @returns nullptr when not found.

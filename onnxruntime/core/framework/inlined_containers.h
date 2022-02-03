@@ -123,7 +123,8 @@ using InlinedHashMap = absl::flat_hash_map<K, V, Hash, Eq, Allocator>;
 // InlinedHashSet and InlinedHashMap
 // This does not allocate a dummy 'end' node on default construction.
 // Use reserve() when the number of elements is known.
-template <class T, class Hash = absl::container_internal::hash_default_hash<T>,
+template <class T, 
+          class Hash = absl::container_internal::hash_default_hash<T>,
           class Eq = absl::container_internal::hash_default_eq<T>,
           class Alloc = std::allocator<T>>
 using NodeHashSet = absl::node_hash_set<T, Hash, Eq, Alloc>;

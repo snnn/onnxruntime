@@ -215,18 +215,11 @@ int GetNodeInputIndexFromInputName(const Node& node, const std::string& input_na
 }
 
 bool IsSupportedOptypeVersionAndDomain(const Node& node,
-                                       const std::string& op_type,
-                                       const std::initializer_list<ONNX_NAMESPACE::OperatorSetVersion>& versions,
-                                       const std::string& domain) {
+                                       std::string_view op_type,
+                                       std::initializer_list<ONNX_NAMESPACE::OperatorSetVersion> versions,
+                                       std::string_view domain) {
   return (node.OpType() == op_type && !node.Op()->Deprecated() &&
-          MatchesOpSinceVersion(node, versions) && MatchesOpSetDomain(node, domain));
-}
-
-bool IsSupportedOptypeVersionAndDomain(const Node& node,
-                                       const char* op_type,
-                                       const std::initializer_list<ONNX_NAMESPACE::OperatorSetVersion>& versions,
-                                       const char* domain) {
-  return IsSupportedOptypeVersionAndDomain(node, std::string(op_type), versions, std::string(domain));
+          MatchesOpSinceVersion(node, versions) && MatchesOpSetDomain(node, std::string(domain)));
 }
 
 bool MatchesOpSinceVersion(const Node& node, std::initializer_list<ONNX_NAMESPACE::OperatorSetVersion> versions) {
@@ -542,10 +535,6 @@ void FinalizeNodeFusion(Graph& graph, Node& first_node, Node& second_node) {
 
   // second node now has no output edges and can be removed
   graph.RemoveNode(second_node.Index());
-}
-
-void FinalizeNodeFusion(Graph& graph, const gsl::span<const std::reference_wrapper<Node>>& nodes, Node& replacement_node) {
-  FinalizeNodeFusion(graph, nodes, replacement_node, replacement_node);
 }
 
 void FinalizeNodeFusion(Graph& graph, const gsl::span<const std::reference_wrapper<Node>>& nodes, Node& replacement_node_start,
