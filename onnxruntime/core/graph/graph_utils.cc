@@ -578,7 +578,8 @@ inline std::string ToString(const gsl::span<const ONNX_NAMESPACE::OperatorSetVer
   return output.str();
 }
 
-bool FindPath(const Node& node, bool is_input_edge, const gsl::span<const EdgeEndToMatch>& edges_to_match, std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger) {
+bool FindPath(const Node& node, bool is_input_edge, const gsl::span<const EdgeEndToMatch>& edges_to_match,
+              std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger) {
   result.clear();
   result.reserve(edges_to_match.size());
 

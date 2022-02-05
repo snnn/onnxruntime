@@ -4136,10 +4136,10 @@ Status Graph::InlineFunction(Node& node) {
   return Status::OK();
 }
 
-void Graph::SetInputs(const std::vector<const NodeArg*>& inputs) {
+void Graph::SetInputs(const gsl::span<const NodeArg* const>& inputs) {
+  graph_inputs_including_initializers_.assign(inputs.begin(), inputs.end());
   if (is_loaded_from_model_file_) {
     // graph loaded from model file
-    graph_inputs_including_initializers_ = inputs;
     graph_inputs_excluding_initializers_.clear();
     for (const auto* input : inputs) {
       ORT_ENFORCE(input->Exists(), "Input to set must exist.");
@@ -4149,10 +4149,6 @@ void Graph::SetInputs(const std::vector<const NodeArg*>& inputs) {
     }
 
     ComputeOverridableInitializers();
-  } else {
-    // creating graph from scratch
-    // rely on SetGraphInputsOutputs() to fix up graph_inputs_excluding_initializers_
-    graph_inputs_including_initializers_ = inputs;
   }
 
   graph_inputs_manually_set_ = true;
@@ -4160,8 +4156,8 @@ void Graph::SetInputs(const std::vector<const NodeArg*>& inputs) {
   GraphResolveNeeded(true);
 }
 
-void Graph::SetOutputs(const std::vector<const NodeArg*>& outputs) {
-  graph_outputs_ = outputs;
+void Graph::SetOutputs(const gsl::span<const NodeArg* const>& outputs) {
+  graph_outputs_.assign(outputs.begin(), outputs.end());
 
   graph_outputs_manually_set_ = true;
   GraphProtoSyncNeeded(true);

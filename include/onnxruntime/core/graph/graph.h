@@ -911,6 +911,19 @@ class Graph {
                    attributes, domain);
   }
 
+  Node& AddNode(const std::string& name,
+                const std::string& op_type,
+                const std::string& description,
+                const gsl::span<NodeArg* const>& input_args,
+                std::initializer_list<NodeArg*> output_args,
+                const NodeAttributes* attributes = nullptr,
+                const std::string& domain = std::string()) {
+    return AddNode(name, op_type, description,
+                   input_args,
+                   gsl::make_span(output_args.begin(), output_args.end()),
+                   attributes, domain);
+  }
+
   /** Remove a Node from this Graph and free it.
   The output edges of this specified node MUST have been removed before removing the node.
   The input edges of this specified node is removed while removing the node. The process of
@@ -1108,13 +1121,21 @@ class Graph {
   @param inputs NodeArgs that represent complete graph inputs which need to be explicitly ordered.
   @remarks Note that the input order matters for subgraphs.
   */
-  void SetInputs(const std::vector<const NodeArg*>& inputs);
+  void SetInputs(const gsl::span<const NodeArg* const>& inputs);
+
+  void SetInputs(std::initializer_list<const NodeArg*> inputs) {
+    SetInputs(gsl::make_span(inputs.begin(), inputs.end()));
+  }
 
   /** Explicitly set graph outputs.
   @param outputs NodeArgs that represent complete graph outputs which need to be explicitly ordered.
   @remarks Note that the output order matters for subgraphs.
   */
-  void SetOutputs(const std::vector<const NodeArg*>& outputs);
+  void SetOutputs(const gsl::span<const NodeArg* const>& outputs);
+
+  void SetOutputs(std::initializer_list<const NodeArg*> outputs) {
+    SetOutputs(gsl::make_span(outputs.begin(), outputs.end()));
+  }
 
 #endif  // !defined(ORT_MINIMAL_BUILD)
 
@@ -1160,14 +1181,18 @@ class Graph {
     return GetConsumerNodesImpl(*this, node_arg_name);
   }
 
-  void UpdateConsumerNodes(const std::string& node_arg_name, const std::vector<Node*>& nodes) {
+  void UpdateConsumerNodes(const std::string& node_arg_name, const gsl::span<Node* const>& nodes) {
     auto iter = node_arg_to_consumer_nodes_.find(node_arg_name);
     if (iter != node_arg_to_consumer_nodes_.end()) {
-      node_arg_to_consumer_nodes_.erase(node_arg_name);
+      node_arg_to_consumer_nodes_.erase(iter);
     }
     for (Node* node : nodes) {
       node_arg_to_consumer_nodes_[node_arg_name].insert(node->Index());
     }
+  }
+
+  void UpdateConsumerNodes(const std::string& node_arg_name, std::initializer_list<Node*> nodes) {
+    UpdateConsumerNodes(node_arg_name, gsl::make_span(nodes.begin(), nodes.end()));
   }
 
   /** During constant folding it may become possible to infer the shape for a node.

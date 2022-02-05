@@ -1437,7 +1437,7 @@ Status PropagateCastOps::ApplyImpl(Graph& graph, bool& modified, int graph_level
 }
 
 PropagateCastOps::PropagateCastOps(GraphTransformerConfiguration::PropagateCastOpsConfiguration::Strategy strategy,
-                                   size_t level, const std::vector<std::string>& _allow_list,
+                                   size_t level, const gsl::span<const std::string>& _allow_list,
                                    const InlinedHashSet<std::string_view>& compatible_execution_providers) noexcept
     : GraphTransformer("PropagateCastOps", compatible_execution_providers), level_(level), strategy_(strategy) {
   fp16_allow_ops[0].clear();  // Remove previously added op types if any.

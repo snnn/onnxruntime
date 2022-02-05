@@ -320,7 +320,7 @@ static bool MatchPositionEmbeddingSubgraphsFromGather(
 
     // Match Shape --> Expand path.
     std::vector<const Node::EdgeEnd*> pg_edges_2;
-    if (!graph_utils::FindPath(expand_node, true, {{0, 1, "Shape", {1, 13}, kOnnxDomain}}, pg_edges_2, logger)) {
+    if (!graph_utils::FindPath(expand_node, true, {graph_utils::EdgeEndToMatch{0, 1, "Shape", {1, 13}, kOnnxDomain}}, pg_edges_2, logger)) {
       DEBUG_LOG("Failed to match Shape node. ");
       return false;
     }
@@ -382,7 +382,7 @@ static bool MatchPositionEmbeddingSubgraph(
   // Constant folding removes Shape and Expand nodes when input has static shape.
   // In that case just look for Gather --> Add.
   std::vector<const Node::EdgeEnd*> edges;
-  if (!graph_utils::FindPath(add_node, true, {{0, 1, "Gather", {1, 11, 13}, kOnnxDomain}}, edges, logger)) {
+  if (!graph_utils::FindPath(add_node, true, {graph_utils::EdgeEndToMatch{0, 1, "Gather", {1, 11, 13}, kOnnxDomain}}, edges, logger)) {
     return false;
   }
   Node& position_gather_node = *graph.GetNode(edges[0]->GetNode().Index());
@@ -841,7 +841,7 @@ Status EmbedLayerNormFusion::ApplyImpl(Graph& graph, bool& modified, int graph_l
     std::vector<const Node::EdgeEnd*> edges;
 
     // Find Add --> LayerNormalization
-    if (!graph_utils::FindPath(layer_norm_node, true, {{0, 0, "Add", {7, 13}, kOnnxDomain}}, edges, logger)) {
+    if (!graph_utils::FindPath(layer_norm_node, true, {graph_utils::EdgeEndToMatch{0, 0, "Add", {7, 13}, kOnnxDomain}}, edges, logger)) {
       continue;
     }
     Node& layer_norm_add_node = *graph.GetNode(edges[0]->GetNode().Index());

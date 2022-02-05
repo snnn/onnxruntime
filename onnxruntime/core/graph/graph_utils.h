@@ -274,7 +274,7 @@ struct EdgeEndToMatch {
 */
 bool FindPath(const Node& node, bool is_input_edge, const gsl::span<const EdgeEndToMatch>& edges_to_match, std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger);
 
-bool FindPath(const Node& node, bool is_input_edge, std::initializer_list<EdgeEndToMatch> edges_to_match, std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger) {
+inline bool FindPath(const Node& node, bool is_input_edge, std::initializer_list<EdgeEndToMatch> edges_to_match, std::vector<const Node::EdgeEnd*>& result, const logging::Logger& logger) {
   return FindPath(node, is_input_edge, gsl::make_span(edges_to_match.begin(), edges_to_match.end()), result, logger);
 }
 
@@ -282,7 +282,7 @@ bool FindPath(const Node& node, bool is_input_edge, std::initializer_list<EdgeEn
 */
 bool FindPath(Graph& graph, const Node& node, bool is_input_edge, const gsl::span<const EdgeEndToMatch>& edges_to_match, std::vector<std::reference_wrapper<Node>>& result, const logging::Logger& logger);
 
-bool FindPath(Graph& graph, const Node& node, bool is_input_edge, std::initializer_list<EdgeEndToMatch> edges_to_match, std::vector<std::reference_wrapper<Node>>& result, const logging::Logger& logger) {
+inline bool FindPath(Graph& graph, const Node& node, bool is_input_edge, std::initializer_list<EdgeEndToMatch> edges_to_match, std::vector<std::reference_wrapper<Node>>& result, const logging::Logger& logger) {
   return FindPath(graph, node, is_input_edge, gsl::make_span(edges_to_match.begin(), edges_to_match.end()), result, logger);
 }
 

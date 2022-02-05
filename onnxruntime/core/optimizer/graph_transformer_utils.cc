@@ -134,7 +134,7 @@ InlinedVector<std::unique_ptr<RewriteRule>> GenerateRewriteRules(
 std::unique_ptr<RuleBasedGraphTransformer> GenerateRuleBasedGraphTransformer(
     TransformerLevel level,
     const InlinedHashSet<std::string>& rules_to_disable,
-    const InlinedHashSet<std::string>& compatible_execution_providers) {
+    const InlinedHashSet<std::string_view>& compatible_execution_providers) {
   auto rewrite_rules_to_register = GenerateRewriteRules(level, rules_to_disable);
   if (rewrite_rules_to_register.empty()) {
     return nullptr;
