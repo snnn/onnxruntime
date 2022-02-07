@@ -188,7 +188,7 @@ TEST(FastGeluTest, FastGeluWithoutBiasFloat16) {
 // failed with invalid device error, disabled for now 
 // CUDA only, ROCM has not been supported yet
 #ifdef USE_CUDA
-TEST(FastGeluTest, DISABLED_FastGeluWithBias_BFloat16) {
+TEST(FastGeluTest, FastGeluWithBias_BFloat16) {
   int min_cuda_architecture = 530;
   if (!HasCudaEnvironment(min_cuda_architecture)) {
     LOGS_DEFAULT(WARNING) << "Hardware NOT support BFP16";
