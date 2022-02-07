@@ -337,8 +337,8 @@ class Node {
   size_t GetOutputEdgesCount() const noexcept { return relationships_.output_edges.size(); }
 
   /** Add an attribute to this Node with specified attribute name and value. */
-  void AddAttribute(const std::string& attr_name, const ONNX_NAMESPACE::AttributeProto& value);
-  void AddAttribute(const std::string& attr_name, ONNX_NAMESPACE::AttributeProto&& value);
+  void AddAttribute(std::string attr_name, const ONNX_NAMESPACE::AttributeProto& value);
+  void AddAttribute(std::string attr_name, ONNX_NAMESPACE::AttributeProto&& value);
 
 #define ADD_ATTR_INTERFACES(TypeName)                                     \
   void AddAttribute(const std::string& attr_name, const TypeName& value); \
@@ -361,7 +361,7 @@ class Node {
   ADD_ATTR_INTERFACES(ONNX_NAMESPACE::TypeProto)
   ADD_ATTR_MOVE_INTERFACE(ONNX_NAMESPACE::TypeProto)
 
-  void AddAttribute(const std::string& attr_name, std::string value);
+  void AddAttribute(std::string attr_name, std::string value);
   void AddAttribute(const std::string& attr_name,
                     const gsl::span<std::string const>& values);
 
@@ -369,17 +369,17 @@ class Node {
   // C-strings with a gsl::span overloads
   template <size_t N>
   void AddAttribute(const std::string& attr_name, const char (&value)[N]) {
-    this->AddAttribute(attr_name, std::string(value, N));
-  }
-
-  template <size_t M>
-  void AddAttribute(const char (&attr_name)[M], const std::string& value) {
-    this->AddAttribute(std::string(attr_name, M), value);
+    this->AddAttribute(attr_name, std::string(value, N - 1));
   }
 
   template <size_t M, size_t N>
   void AddAttribute(const char (&attr_name)[M], const char (&value)[N]) {
-    this->AddAttribute(std::string(attr_name, M), std::string(value, N));
+    this->AddAttribute(std::string(attr_name, M - 1), std::string(value, N - 1));
+  }
+
+  template <size_t M, typename T>
+  void AddAttribute(const char (&attr_name)[M], T&& value) {
+    this->AddAttribute(std::string(attr_name, M - 1), std::forward<T>(value));
   }
 
   /** Gets the Node's attributes. */
@@ -923,6 +923,20 @@ class Graph {
                    gsl::make_span(output_args.begin(), output_args.end()),
                    attributes, domain);
   }
+
+  Node& AddNode(const std::string& name,
+                const std::string& op_type,
+                const std::string& description,
+                std::initializer_list<NodeArg*> input_args,
+                const gsl::span<NodeArg* const>& output_args,
+                const NodeAttributes* attributes = nullptr,
+                const std::string& domain = std::string()) {
+    return AddNode(name, op_type, description,
+                   gsl::make_span(input_args.begin(), input_args.end()),
+                   output_args,
+                   attributes, domain);
+  }
+
 
   /** Remove a Node from this Graph and free it.
   The output edges of this specified node MUST have been removed before removing the node.

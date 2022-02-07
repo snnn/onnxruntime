@@ -872,29 +872,29 @@ void Node::CreateSubgraph(const std::string& attr_name) {
 
 #endif  // !defined(ORT_MINIMAL_BUILD)
 
-void Node::AddAttribute(const std::string& attr_name, const AttributeProto& value) {
+void Node::AddAttribute(std::string attr_name, const ONNX_NAMESPACE::AttributeProto& value) {
   graph_->SetGraphResolveNeeded();
   graph_->SetGraphProtoSyncNeeded();
-  attributes_.emplace(attr_name, value);
+  attributes_.emplace(std::move(attr_name), value);
 }
 
-void Node::AddAttribute(const std::string& attr_name, AttributeProto&& value) {
+void Node::AddAttribute(std::string attr_name, ONNX_NAMESPACE::AttributeProto&& value) {
   graph_->SetGraphResolveNeeded();
   graph_->SetGraphProtoSyncNeeded();
-  attributes_.emplace(attr_name, std::move(value));
+  attributes_.emplace(std::move(attr_name), std::move(value));
 }
 
-static void AddAttributeHelper(Node& node, const std::string& attr_name,
+static void AddAttributeHelper(Node& node, std::string attr_name,
                                AttributeProto_AttributeType attr_type, AttributeProto&& a) {
   a.set_name(attr_name);
   a.set_type(attr_type);
-  node.AddAttribute(attr_name, std::move(a));
+  node.AddAttribute(std::move(attr_name), std::move(a));
 }
 
-void Node::AddAttribute(const std::string& attr_name, std::string value) {
+void Node::AddAttribute(std::string attr_name, std::string value) {
   AttributeProto a;
   *(a.mutable_s()) = std::move(value);
-  AddAttributeHelper(*this, attr_name,
+  AddAttributeHelper(*this, std::move(attr_name),
                      AttributeProto_AttributeType::AttributeProto_AttributeType_STRING,
                      std::move(a));
 };
@@ -953,9 +953,16 @@ void Node::AddAttribute(const std::string& attr_name, GraphProto&& value) {
 #endif
 };
 
+void Node::AddAttribute(const std::string& attr_name, const TensorProto& value) {
+  AttributeProto a;
+  *a.mutable_t() = value;
+  AddAttributeHelper(*this, attr_name, AttributeProto_AttributeType::AttributeProto_AttributeType_TENSOR, std::move(a));
+};
+
+
 ADD_BASIC_ATTR_IMPL(float, AttributeProto_AttributeType::AttributeProto_AttributeType_FLOAT, f)
 ADD_BASIC_ATTR_IMPL(int64_t, AttributeProto_AttributeType::AttributeProto_AttributeType_INT, i)
-ADD_ATTR_IMPL(TensorProto, AttributeProto_AttributeType::AttributeProto_AttributeType_TENSOR, t)
+// ADD_ATTR_IMPL(TensorProto, AttributeProto_AttributeType::AttributeProto_AttributeType_TENSOR, t)
 ADD_ATTR_MOVE_IMPL(TensorProto, AttributeProto_AttributeType::AttributeProto_AttributeType_TENSOR, t)
 ADD_ATTR_IMPL(TypeProto, AttributeProto_AttributeType::AttributeProto_AttributeType_TYPE_PROTO, tp)
 ADD_ATTR_MOVE_IMPL(TypeProto, AttributeProto_AttributeType::AttributeProto_AttributeType_TYPE_PROTO, tp)
