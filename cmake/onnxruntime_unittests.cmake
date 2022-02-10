@@ -1296,3 +1296,24 @@ if (onnxruntime_USE_STVM)
 endif()
 
 include(onnxruntime_fuzz_test.cmake)
+
+if(onnxruntime_USE_XNNPACK)
+    onnxruntime_add_executable(onnxruntime_xnnpack_test   "${TEST_SRC_DIR}/xnnpack/main.cpp" "${TEST_SRC_DIR}/xnnpack/model.c" "${TEST_SRC_DIR}/xnnpack/input.c")
+    if(${CMAKE_SYSTEM_NAME} STREQUAL "iOS")
+      set_target_properties(onnxruntime_xnnpack_test PROPERTIES
+        XCODE_ATTRIBUTE_CODE_SIGNING_ALLOWED "NO"
+    )
+    endif()
+    target_include_directories(onnxruntime_xnnpack_test PRIVATE ${ONNXRUNTIME_ROOT}
+            ${CMAKE_CURRENT_BINARY_DIR})
+    target_link_libraries(onnxruntime_xnnpack_test PRIVATE  onnxruntime_session
+  onnxruntime_optimizer
+  onnxruntime_providers
+  onnxruntime_util
+  onnxruntime_framework
+  onnxruntime_graph
+  ${ONNXRUNTIME_MLAS_LIBS}
+  onnxruntime_common
+  onnxruntime_flatbuffers ${onnxruntime_EXTERNAL_LIBRARIES})
+    set_target_properties(onnxruntime_xnnpack_test PROPERTIES FOLDER "ONNXRuntimeTest")
+endif()
