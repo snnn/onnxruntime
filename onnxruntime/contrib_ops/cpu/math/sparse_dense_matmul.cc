@@ -80,6 +80,7 @@ inline void SparseDenseMatMulImpl<float>(const ComputeCtx& ctx, const ConstSpars
 template <class T>
 struct SparseToDenseCsr {
   void operator()(const ComputeCtx& ctx, const SparseTensor& A, const Tensor& B, Tensor& output) const {
+#if 0
     const auto& a_dims = A.DenseShape().GetDims();
     const auto& b_dims = B.Shape().GetDims();
     const auto& out_dims = output.Shape().GetDims();
@@ -94,6 +95,7 @@ struct SparseToDenseCsr {
     // XXX: Consider re-writing it as a parallel loop as Eigen requires it to use OpenMP
     // XXX: Consider vectorization
     SparseDenseMatMulImpl(ctx, map_A, map_B, output_map);
+#endif
   }
 };
 
