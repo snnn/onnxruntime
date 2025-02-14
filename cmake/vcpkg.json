@@ -101,10 +101,6 @@
   },
   "overrides": [
     {
-      "name": "protobuf",
-      "version": "3.21.12#4"
-    },
-    {
       "name": "flatbuffers",
       "version": "23.5.26"
     }
