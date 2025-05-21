@@ -31,19 +31,19 @@ namespace cuda {
           .MayInplace(0, 0),                                     \
       x<T>);
 
-#define UNARY_ACTIVATION_COMPUTE(x, T)                                                                     \
-  template <>                                                                                              \
-  Status x<T>::ComputeInternal(OpKernelContext* context) const {                                           \
-    UnaryElementwisePreparation p;                                                                         \
-    ORT_RETURN_IF_ERROR(UnaryElementwise::Prepare(context, &p));                                           \
-    Ctx##x func_ctx = MakeFuncCtx();                                                                       \
-    Impl_##x<typename ToCudaType<T>::MappedType>(                                                          \
-        Stream(),                                                                                          \
-        reinterpret_cast<const typename ToCudaType<T>::MappedType*>(p.input_tensor->template Data<T>()),   \
-        reinterpret_cast<typename ToCudaType<T>::MappedType*>(p.output_tensor->template MutableData<T>()), \
-        &func_ctx, p.output_tensor->Shape().Size());                                                       \
-                                                                                                           \
-    return Status::OK();                                                                                   \
+#define UNARY_ACTIVATION_COMPUTE(x, T)                                                            \
+  template <>                                                                                     \
+  Status x<T>::ComputeInternal(OpKernelContext* context) const {                                  \
+    UnaryElementwisePreparation p;                                                                \
+    ORT_RETURN_IF_ERROR(UnaryElementwise::Prepare(context, &p));                                  \
+    Ctx##x func_ctx = MakeFuncCtx();                                                              \
+    Impl_##x<typename ToCudaType<T>::MappedType>(                                                 \
+        Stream(context),                                                                          \
+        reinterpret_cast<const typename ToCudaType<T>::MappedType*>(p.input_tensor->Data<T>()),   \
+        reinterpret_cast<typename ToCudaType<T>::MappedType*>(p.output_tensor->MutableData<T>()), \
+        &func_ctx, p.output_tensor->Shape().Size());                                              \
+                                                                                                  \
+    return Status::OK();                                                                          \
   }
 
 #define UNARY_ACTIVATION_OP_VERSIONED_TYPED(name, startver, endver, T) \
@@ -72,7 +72,7 @@ namespace cuda {
 
 UNARY_ACTIVATION_OP_HFD(Elu, 6);
 UNARY_ACTIVATION_OP_HFD(HardSigmoid, 6);
-UNARY_ACTIVATION_OP_HFD(LeakyRelu, 6);
+UNARY_ACTIVATION_OP_VERSIONED_HFD(LeakyRelu, 6, 15);
 UNARY_ACTIVATION_OP_HFD(Relu, 14);
 UNARY_ACTIVATION_OP_VERSIONED_HFD_WITH_BF16(Relu, 13, 13);
 UNARY_ACTIVATION_OP_VERSIONED_HFD(Relu, 6, 12);
@@ -84,6 +84,9 @@ UNARY_ACTIVATION_OP_HFD(Softsign, 1);
 UNARY_ACTIVATION_OP_HFD(Tanh, 13);
 UNARY_ACTIVATION_OP_VERSIONED_HFD(Tanh, 6, 12);
 UNARY_ACTIVATION_OP_HFD(ThresholdedRelu, 10);
+
+// Opset-16 adds BFloat16 to allowed types for the LeakyRelu operator
+UNARY_ACTIVATION_OP_HFD(LeakyRelu, 16);
 
 }  // namespace cuda
 }  // namespace onnxruntime

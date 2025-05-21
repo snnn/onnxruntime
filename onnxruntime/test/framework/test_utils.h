@@ -5,12 +5,11 @@
 #include <map>
 #include <string>
 
-#include "core/framework/allocatormgr.h"
 #include "core/framework/execution_provider.h"
 #include "core/providers/cpu/cpu_execution_provider.h"
 #include "core/framework/ort_value.h"
 
-#include "gsl/gsl"
+#include <gsl/gsl>
 
 #ifdef USE_CUDA
 #include "core/providers/providers.h"
@@ -32,21 +31,14 @@ namespace test {
 // Doesn't work with ExecutionProviders class and KernelRegistryManager
 IExecutionProvider* TestCPUExecutionProvider();
 
-#ifdef USE_NNAPI
-IExecutionProvider* TestNnapiExecutionProvider();
-#endif
-
-#ifdef USE_RKNPU
-IExecutionProvider* TestRknpuExecutionProvider();
-#endif
-
-#ifdef USE_COREML
-IExecutionProvider* TestCoreMLExecutionProvider(uint32_t coreml_flags);
-#endif
-
 template <typename T>
+inline void CopyVectorToTensor(gsl::span<const T> value, Tensor& tensor) {
+  gsl::copy(value, tensor.MutableDataAsSpan<T>());
+}
+
+template <class T>
 inline void CopyVectorToTensor(const std::vector<T>& value, Tensor& tensor) {
-  gsl::copy(gsl::make_span(value), tensor.MutableDataAsSpan<T>());
+  gsl::copy(AsSpan(value), tensor.MutableDataAsSpan<T>());
 }
 
 // vector<bool> is specialized so we need to handle it separately
@@ -58,8 +50,20 @@ inline void CopyVectorToTensor<bool>(const std::vector<bool>& value, Tensor& ten
   }
 }
 
+template <class T>
+void CreateMLValue(AllocatorPtr alloc, gsl::span<const int64_t> dims, const std::vector<T>& value,
+                   OrtValue* p_mlvalue) {
+  TensorShape shape(dims);
+  auto element_type = DataTypeImpl::GetType<T>();
+  Tensor::InitOrtValue(element_type, shape, std::move(alloc), *p_mlvalue);
+  if (!value.empty()) {
+    Tensor& tensor = *p_mlvalue->GetMutable<Tensor>();
+    CopyVectorToTensor(value, tensor);
+  }
+}
+
 template <typename T>
-void CreateMLValue(AllocatorPtr alloc, const std::vector<int64_t>& dims, const std::vector<T>& value,
+void CreateMLValue(AllocatorPtr alloc, gsl::span<const int64_t> dims, gsl::span<const T> value,
                    OrtValue* p_mlvalue) {
   TensorShape shape(dims);
   auto element_type = DataTypeImpl::GetType<T>();
@@ -69,6 +73,24 @@ void CreateMLValue(AllocatorPtr alloc, const std::vector<int64_t>& dims, const s
     Tensor& tensor = *p_mlvalue->GetMutable<Tensor>();
     CopyVectorToTensor(value, tensor);
   }
+}
+
+template <class T>
+void CreateMLValue(AllocatorPtr alloc, std::initializer_list<int64_t> dims, gsl::span<const T> value,
+                   OrtValue* p_mlvalue) {
+  CreateMLValue<T>(alloc, AsSpan(dims), value, p_mlvalue);
+}
+
+template <class T>
+void CreateMLValue(AllocatorPtr alloc, gsl::span<const int64_t> dims, std::initializer_list<T> value,
+                   OrtValue* p_mlvalue) {
+  CreateMLValue<T>(alloc, dims, AsSpan(value), p_mlvalue);
+}
+
+template <class T>
+void CreateMLValue(AllocatorPtr alloc, std::initializer_list<int64_t> dims, std::initializer_list<T> value,
+                   OrtValue* p_mlvalue) {
+  CreateMLValue<T>(alloc, AsSpan(dims), AsSpan(value), p_mlvalue);
 }
 
 // Lifetime of data_buffer should be managed by the caller.
@@ -81,7 +103,7 @@ void CreateMLValue(gsl::span<const int64_t> dims, T* data_buffer, const OrtMemor
 }
 
 template <typename T>
-void AllocateMLValue(AllocatorPtr alloc, const std::vector<int64_t>& dims, OrtValue* p_mlvalue) {
+void AllocateMLValue(AllocatorPtr alloc, gsl::span<const int64_t> dims, OrtValue* p_mlvalue) {
   TensorShape shape(dims);
   auto element_type = DataTypeImpl::GetType<T>();
   Tensor::InitOrtValue(element_type, shape, std::move(alloc), *p_mlvalue);
@@ -93,9 +115,18 @@ using OpCountMap = std::map<std::string, int>;
 // Helper function to check that the graph transformations have been successfully applied.
 OpCountMap CountOpsInGraph(const Graph& graph, bool recurse_into_subgraphs = true);
 
+// Gets the op count from the OpCountMap.
+// Can be called with a const OpCountMap, unlike OpCountMap::operator[].
+inline int OpCount(const OpCountMap& op_count_map, const std::string& op_type) {
+  if (auto it = op_count_map.find(op_type); it != op_count_map.end()) {
+    return it->second;
+  }
+  return 0;
+}
+
 #if !defined(DISABLE_SPARSE_TENSORS)
 void SparseIndicesChecker(const ONNX_NAMESPACE::TensorProto& indices_proto, gsl::span<const int64_t> expected_indicies);
-#endif // DISABLE_SPARSE_TENSORS
+#endif  // DISABLE_SPARSE_TENSORS
 
 }  // namespace test
 }  // namespace onnxruntime

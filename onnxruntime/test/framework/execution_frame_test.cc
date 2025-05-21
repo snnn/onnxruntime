@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include "core/common/span_utils.h"
 #include "core/framework/execution_frame.h"
 #include "core/framework/op_kernel.h"
 #include "core/framework/session_state.h"
@@ -58,23 +59,40 @@ TEST_F(ExecutionFrameTest, TensorAllocationTest) {
   ASSERT_STATUS_OK(kernel_registry_manager.RegisterKernels(execution_providers));
 
   DataTransferManager dtm;
+  ExternalDataLoaderManager edlm;
   profiling::Profiler profiler;
-  SessionState state(graph, execution_providers, true, &tp_, nullptr, dtm,
-                     DefaultLoggingManager().DefaultLogger(), profiler);
+
+  SessionOptions sess_options;
+  sess_options.enable_mem_pattern = true;
+  sess_options.execution_mode = ExecutionMode::ORT_SEQUENTIAL;
+  sess_options.use_deterministic_compute = false;
+  sess_options.enable_mem_reuse = true;
+
+  SessionState state(graph, execution_providers, &tp_, nullptr, dtm, edlm,
+                     DefaultLoggingManager().DefaultLogger(), profiler, sess_options);
 
   node->SetExecutionProviderType(xp_typ);
 
   ASSERT_STATUS_OK(state.FinalizeSessionState(ORT_TSTR(""), kernel_registry_manager));
 
   vector<OrtValue> outputs;
-  ExecutionFrame frame({}, {}, {}, outputs, {}, state);
+  ExecutionFrame frame(
+      {},
+      {},
+      {},
+      outputs,
+      {},
+#ifdef ORT_ENABLE_STREAM
+      {},
+#endif
+      state);
 
   int start_index = frame.GetNodeOffset(node->Index());
   ASSERT_EQ(start_index, 0);
 
   TensorShape shape(std::vector<int64_t>{2, 3});
   OrtValue& mlvalue0 = *frame.GetMutableNodeInputOrOutputMLValue(start_index);
-  const auto& memory_info = execution_providers.Get(xp_typ)->GetAllocator(0, OrtMemTypeDefault)->Info();
+  const auto& memory_info = execution_providers.Get(xp_typ)->GetOrtDeviceByMemType(OrtMemTypeDefault);
   ASSERT_STATUS_OK(frame.AllocateMLValueTensorSelfOwnBuffer(mlvalue0, start_index, DataTypeImpl::GetType<float>(),
                                                             memory_info, shape));
 
@@ -85,20 +103,20 @@ TEST_F(ExecutionFrameTest, TensorAllocationTest) {
   ASSERT_EQ(p_tensor->Shape(), shape);
   ASSERT_EQ(p_tensor->DataType(), DataTypeImpl::GetType<float>());
 
-  //test share memory from tensor
+  // test share memory from tensor
   TensorShape shape2(std::vector<int64_t>{3, 2});
   OrtValue& mlvalue1 = *frame.GetMutableNodeInputOrOutputMLValue(start_index + 1);
   ASSERT_STATUS_OK(frame.AllocateMLValueTensorPreAllocateBuffer(mlvalue1,
                                                                 start_index,
                                                                 DataTypeImpl::GetType<float>(),
-                                                                p_tensor->Location(),
+                                                                p_tensor->Location().device,
                                                                 shape2));
 
   const OrtValue* p_ml_value_const = frame.GetNodeInputOrOutputMLValue(1);
   auto tensor2 = p_ml_value_const ? &(p_ml_value_const->Get<Tensor>()) : nullptr;
   ASSERT_TRUE(tensor2);
   ASSERT_EQ(tensor2->Shape(), shape2);
-  ASSERT_EQ(tensor2->template Data<float>(), p_tensor->template Data<float>());
+  ASSERT_EQ(tensor2->Data<float>(), p_tensor->Data<float>());
 }
 
 TEST_F(ExecutionFrameTest, OutputShapeValidationTest) {
@@ -126,16 +144,33 @@ TEST_F(ExecutionFrameTest, OutputShapeValidationTest) {
   ASSERT_STATUS_OK(kernel_registry_manager.RegisterKernels(execution_providers));
 
   DataTransferManager dtm;
+  ExternalDataLoaderManager edlm;
   profiling::Profiler profiler;
-  SessionState state(graph, execution_providers, true, &tp_, nullptr, dtm,
-                     DefaultLoggingManager().DefaultLogger(), profiler);
+
+  SessionOptions sess_options;
+  sess_options.enable_mem_pattern = true;
+  sess_options.execution_mode = ExecutionMode::ORT_SEQUENTIAL;
+  sess_options.use_deterministic_compute = false;
+  sess_options.enable_mem_reuse = true;
+
+  SessionState state(graph, execution_providers, &tp_, nullptr, dtm, edlm,
+                     DefaultLoggingManager().DefaultLogger(), profiler, sess_options);
 
   node->SetExecutionProviderType(xp_typ);
 
   ASSERT_STATUS_OK(state.FinalizeSessionState(ORT_TSTR(""), kernel_registry_manager));
 
   vector<OrtValue> outputs;
-  ExecutionFrame frame({}, {}, {}, outputs, {}, state);
+  ExecutionFrame frame(
+      {},
+      {},
+      {},
+      outputs,
+      {},
+#ifdef ORT_ENABLE_STREAM
+      {},
+#endif
+      state);
 
   int start_index = frame.GetNodeOffset(node->Index());
   ASSERT_EQ(start_index, 0);
@@ -168,7 +203,7 @@ TEST_F(ExecutionFrameTest, FeedInDataTest) {
   auto element_type = DataTypeImpl::GetType<float>();
   TensorShape shape({3, 2});
   std::vector<float> fdata(static_cast<size_t>(shape.Size()));
-  //create fake ml value with owned buffer.
+  // create fake ml value with owned buffer.
   OrtMemoryInfo cpuinfo(kCpuExecutionProvider, OrtDeviceAllocator);
   OrtValue value;
   Tensor::InitOrtValue(element_type, shape, fdata.data(), cpuinfo, value);
@@ -182,9 +217,17 @@ TEST_F(ExecutionFrameTest, FeedInDataTest) {
   ASSERT_STATUS_OK(kernel_registry_manager.RegisterKernels(execution_providers));
 
   DataTransferManager dtm;
+  ExternalDataLoaderManager edlm;
   profiling::Profiler profiler;
-  SessionState state(graph, execution_providers, true, &tp_, nullptr, dtm,
-                     DefaultLoggingManager().DefaultLogger(), profiler);
+
+  SessionOptions sess_options;
+  sess_options.enable_mem_pattern = true;
+  sess_options.execution_mode = ExecutionMode::ORT_SEQUENTIAL;
+  sess_options.use_deterministic_compute = false;
+  sess_options.enable_mem_reuse = true;
+
+  SessionState state(graph, execution_providers, &tp_, nullptr, dtm, edlm,
+                     DefaultLoggingManager().DefaultLogger(), profiler, sess_options);
 
   ASSERT_STATUS_OK(state.FinalizeSessionState(ORT_TSTR(""), kernel_registry_manager));
 
@@ -194,7 +237,16 @@ TEST_F(ExecutionFrameTest, FeedInDataTest) {
   ASSERT_TRUE(mlvalue_name_idx_map.GetIdx("Y", y_idx).IsOK());
 
   vector<OrtValue> outputs;
-  ExecutionFrame frame({x_idx}, {value}, {y_idx}, outputs, {}, state);
+  ExecutionFrame frame(
+      AsSpan({x_idx}),
+      AsSpan({value}),
+      AsSpan({y_idx}),
+      outputs,
+      {},
+#ifdef ORT_ENABLE_STREAM
+      {},
+#endif
+      state);
 
   OrtValue* p_ml_value = frame.GetMutableNodeInputOrOutputMLValue(0);
   Tensor* p_tensor_arg_0 = p_ml_value ? p_ml_value->GetMutable<Tensor>() : nullptr;
@@ -235,12 +287,20 @@ TEST_F(ExecutionFrameTest, MemPatternTest) {
   ExecutionProviders execution_providers;
   ASSERT_STATUS_OK(execution_providers.Add(xp_type, std::move(cpu_xp)));
   ASSERT_STATUS_OK(kernel_registry_manager.RegisterKernels(execution_providers));
-  //1. prepare input
+  // 1. prepare input
 
   DataTransferManager dtm;
+  ExternalDataLoaderManager edlm;
   profiling::Profiler profiler;
-  SessionState state(graph, execution_providers, true, &tp_, nullptr, dtm,
-                     DefaultLoggingManager().DefaultLogger(), profiler);
+
+  SessionOptions sess_options;
+  sess_options.enable_mem_pattern = true;
+  sess_options.execution_mode = ExecutionMode::ORT_SEQUENTIAL;
+  sess_options.use_deterministic_compute = false;
+  sess_options.enable_mem_reuse = true;
+
+  SessionState state(graph, execution_providers, &tp_, nullptr, dtm, edlm,
+                     DefaultLoggingManager().DefaultLogger(), profiler, sess_options);
 
   ASSERT_STATUS_OK(state.FinalizeSessionState(ORT_TSTR(""), kernel_registry_manager));
 
@@ -256,7 +316,7 @@ TEST_F(ExecutionFrameTest, MemPatternTest) {
   ASSERT_TRUE(mlvalue_name_idx_map.GetIdx("T2", t2_idx).IsOK());
   ASSERT_TRUE(mlvalue_name_idx_map.GetIdx("T3", t3_idx).IsOK());
 
-  auto cpu_allocator = execution_providers.Get(xp_type)->GetAllocator(0, OrtMemTypeDefault);
+  auto cpu_allocator = execution_providers.Get(xp_type)->CreatePreferredAllocators()[0];
 
   OrtValue v1, v2, v3;
   CreateMLValue<float>(cpu_allocator,
@@ -269,8 +329,17 @@ TEST_F(ExecutionFrameTest, MemPatternTest) {
                        std::vector<int64_t>{2, 3},
                        std::vector<float>(6, 1.0f), &v3);
 
-  vector<OrtValue> outputs;
-  ExecutionFrame frame({x1_idx, x2_idx, x3_idx}, {v1, v2, v3}, {t3_idx}, outputs, {}, state);
+  std::vector<OrtValue> outputs;
+  ExecutionFrame frame(
+      AsSpan({x1_idx, x2_idx, x3_idx}),
+      AsSpan({v1, v2, v3}),
+      AsSpan({t3_idx}),
+      outputs,
+      {},
+#ifdef ORT_ENABLE_STREAM
+      {},
+#endif
+      state);
 
   OrtValue& mlvalue3 = *frame.GetMutableNodeInputOrOutputMLValue(3);
   OrtValue& mlvalue4 = *frame.GetMutableNodeInputOrOutputMLValue(4);
@@ -278,24 +347,24 @@ TEST_F(ExecutionFrameTest, MemPatternTest) {
 
   ASSERT_STATUS_OK(frame.AllocateMLValueTensorSelfOwnBuffer(mlvalue3, 3,
                                                             DataTypeImpl::GetType<float>(),
-                                                            cpu_allocator->Info(),
+                                                            cpu_allocator->Info().device,
                                                             TensorShape(std::vector<int64_t>{2, 2})));
 
   ASSERT_STATUS_OK(frame.AllocateMLValueTensorSelfOwnBuffer(mlvalue4, 4,
                                                             DataTypeImpl::GetType<float>(),
-                                                            cpu_allocator->Info(),
+                                                            cpu_allocator->Info().device,
                                                             TensorShape(std::vector<int64_t>{2, 3})));
 
   ASSERT_STATUS_OK(frame.AllocateMLValueTensorSelfOwnBuffer(mlvalue5, 5,
                                                             DataTypeImpl::GetType<float>(),
-                                                            cpu_allocator->Info(),
+                                                            cpu_allocator->Info().device,
                                                             TensorShape(std::vector<int64_t>{2, 3})));
   MemoryPatternGroup pattern;
-  ASSERT_STATUS_OK(frame.GeneratePatterns(&pattern));
+  ASSERT_STATUS_OK(frame.GeneratePatterns(pattern));
 
   ASSERT_EQ(pattern.patterns.size(), pattern.locations.size());
   ASSERT_EQ(pattern.patterns.size(), 1u);
-  auto p = pattern.GetPatterns(cpu_allocator->Info());
+  auto p = pattern.GetPatterns(cpu_allocator->Info().device);
   ASSERT_EQ(p->PeakSize(), 2u * kAllocAlignment);  // each allocation is kAllocAlignment-byte aligned
   ASSERT_EQ(p->GetBlock(3)->offset_, 0u);
   ASSERT_EQ(p->GetBlock(4)->offset_, kAllocAlignment);
@@ -337,9 +406,12 @@ TEST_F(ExecutionFrameTest, MemPatternWithExternalOutputsTest) {
   ASSERT_STATUS_OK(kernel_registry_manager.RegisterKernels(execution_providers));
 
   DataTransferManager dtm;
+  ExternalDataLoaderManager edlm;
   profiling::Profiler profiler;
-  SessionState state(graph, execution_providers, true, &tp_, nullptr, dtm, DefaultLoggingManager().DefaultLogger(),
-                     profiler);
+  SessionOptions so;
+
+  SessionState state(graph, execution_providers, &tp_, nullptr, dtm, edlm, DefaultLoggingManager().DefaultLogger(),
+                     profiler, so);
 
   ASSERT_STATUS_OK(state.FinalizeSessionState(ORT_TSTR(""), kernel_registry_manager));
 
@@ -350,14 +422,23 @@ TEST_F(ExecutionFrameTest, MemPatternWithExternalOutputsTest) {
   ASSERT_TRUE(mlvalue_name_idx_map.GetIdx("T", t_idx).IsOK());
   ASSERT_TRUE(mlvalue_name_idx_map.GetIdx("Y", y_idx).IsOK());
 
-  auto cpu_allocator = execution_providers.Get(xp_type)->GetAllocator(0, OrtMemTypeDefault);
+  auto cpu_allocator = execution_providers.Get(xp_type)->CreatePreferredAllocators()[0];
 
   OrtValue x_value, t_value;
   CreateMLValue<float>(cpu_allocator, std::vector<int64_t>{2, 2}, std::vector<float>(4, 2.0f), &x_value);
   CreateMLValue<float>(cpu_allocator, std::vector<int64_t>{2, 2}, std::vector<float>(4, 1.0f), &t_value);
 
   vector<OrtValue> outputs;
-  ExecutionFrame frame({x_idx}, {x_value}, {y_idx}, outputs, {}, state);
+  ExecutionFrame frame(
+      AsSpan({x_idx}),
+      AsSpan({x_value}),
+      AsSpan({y_idx}),
+      outputs,
+      {},
+#ifdef ORT_ENABLE_STREAM
+      {},
+#endif
+      state);
 
   ASSERT_FALSE(frame.GetMutableNodeInputOrOutputMLValue(t_idx)->IsTensor());
   ASSERT_STATUS_OK(frame.SetOutputMLValue(t_idx, t_value));
@@ -365,22 +446,27 @@ TEST_F(ExecutionFrameTest, MemPatternWithExternalOutputsTest) {
 
   OrtValue& y_value = *frame.GetMutableNodeInputOrOutputMLValue(y_idx);
   ASSERT_STATUS_OK(frame.AllocateMLValueTensorSelfOwnBuffer(
-      y_value, y_idx, DataTypeImpl::GetType<float>(), cpu_allocator->Info(), TensorShape(std::vector<int64_t>{2, 2})));
+      y_value, y_idx, DataTypeImpl::GetType<float>(), cpu_allocator->Info().device, TensorShape(std::vector<int64_t>{2, 2})));
 
   MemoryPatternGroup pattern;
-  ASSERT_STATUS_OK(frame.GeneratePatterns(&pattern));
+  ASSERT_STATUS_OK(frame.GeneratePatterns(pattern));
 
   ASSERT_EQ(pattern.patterns.size(), pattern.locations.size());
   ASSERT_EQ(pattern.patterns.size(), 1u);
-  auto p = pattern.GetPatterns(cpu_allocator->Info());
+  auto p = pattern.GetPatterns(cpu_allocator->Info().device);
   ASSERT_EQ(p->PeakSize(), 0u);  // Peak size is 0.
 }
 #endif
 
 TEST(ExecutionFrameTestWithoutSessionState, BadModelInvalidDimParamUsage) {
-  // load model with 2 Scan ops that both incorrectly use shapes of { 'None', 'None' } for their outputs.
-  // as 'None' is not a special value it's treated as a variable name, leading to a runtime error when we
-  // attempt to re-use the output from the first Scan node for the second. validate we detect this and error out.
+  // Model that has 2 inputs with shape {'Symbolic', 'Symbolic'} that is carefully constructed to re-use a
+  // buffer the size of one input for output the size of the other input.
+  // The model is fine if all values of 'Symbolic' are the same, but invalid if they are not.
+  // As both inputs claim to have the same size, the allocation plan is based on that.
+  // Code in ExecutionFrame catches what would result in buffer overflow if input 2 is actually larger than input 1
+  // and we're attempting to re-use a buffer the size of input 1.
+  // The 'real' problem being tested is inconsistent values for a dim_param in a model, which could occur anywhere
+  // in the model.
   SessionOptions so;
   so.session_logid = "BadModelInvalidDimParamUsage";
 
@@ -388,17 +474,27 @@ TEST(ExecutionFrameTestWithoutSessionState, BadModelInvalidDimParamUsage) {
   ASSERT_STATUS_OK(session_object.Load("testdata/invalid_dim_param_value_repetition.onnx"));
   ASSERT_STATUS_OK(session_object.Initialize());
 
-  std::vector<int64_t> dims_X = {10, 6};
-  std::vector<float> values_X;
-  values_X.reserve(60);
+  std::vector<int64_t> dims_X1 = {10, 6};
+  std::vector<float> values_X1;
+  values_X1.reserve(60);
   for (int i = 0; i < 60; ++i) {
-    values_X.push_back(float(i));
+    values_X1.push_back(float(i));
   }
 
-  OrtValue ml_value;
-  CreateMLValue<float>(TestCPUExecutionProvider()->GetAllocator(0, OrtMemTypeDefault), dims_X, values_X, &ml_value);
+  std::vector<int64_t> dims_X2 = {10, 12};
+  std::vector<float> values_X2;
+  values_X2.reserve(120);
+  for (int i = 0; i < 120; ++i) {
+    values_X2.push_back(float(i));
+  }
+
+  OrtValue ml_value1;
+  CreateMLValue<float>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], dims_X1, values_X1, &ml_value1);
+  OrtValue ml_value2;
+  CreateMLValue<float>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], dims_X2, values_X2, &ml_value2);
   NameMLValMap feeds;
-  feeds.insert(std::make_pair("X", ml_value));
+  feeds.insert({"X1", ml_value1});
+  feeds.insert({"X2", ml_value2});
 
   // prepare outputs
   std::vector<std::string> output_names;
@@ -438,7 +534,8 @@ TEST(ExecutionFrameTestInit, InitializerAsOutput) {
     const void* orig_buffer = results[0].Get<Tensor>().DataRaw();
 
     RunOptions ro;
-    ASSERT_STATUS_OK(session.Run(ro, {}, {}, {"values"}, &results, nullptr));
+    ASSERT_STATUS_OK(session.Run(ro, EmptySpan<const std::string>(),
+                                 EmptySpan<const OrtValue>(), AsSpan({std::string("values")}), &results, nullptr));
 
     EXPECT_EQ(results[0].Get<Tensor>().DataRaw(), orig_buffer);
     EXPECT_THAT(results[0].Get<Tensor>().DataAsSpan<float>(), ::testing::ContainerEq(gsl::make_span(expected)));
@@ -452,7 +549,8 @@ TEST(ExecutionFrameTestInit, InitializerAsOutput) {
 
     std::vector<OrtValue> results;
     RunOptions ro;
-    ASSERT_STATUS_OK(session.Run(ro, {}, {}, {"values"}, &results, nullptr));
+    ASSERT_STATUS_OK(session.Run(ro, EmptySpan<std::string>(),
+                                 EmptySpan<OrtValue>(), AsSpan({std::string("values")}), &results, nullptr));
 
     // output buffer should not be the same as the initializer in SessionState
     const auto& initializers = session.GetSessionState().GetInitializedTensors();
@@ -463,17 +561,18 @@ TEST(ExecutionFrameTestInit, InitializerAsOutput) {
 
 #if !defined(DISABLE_SPARSE_TENSORS)
 TEST(ExecutionFrameTestInit, SparseInitializerAsOutput) {
+  constexpr std::array<int64_t, 2> dense_shape{3, 3};
 
-  const std::vector<int64_t> dense_shape{3, 3};
-  std::vector<float> dense_data = {
-      0, 0, 1.764052391052246f,
-      0.40015721321105957f, 0, 0.978738009929657f,
-      0, 0, 0};
+  // Tensor data in a dense form, useful for debugging and reference.
+  // constexpr std::array<float, 9> dense_data = {
+  //     0, 0, 1.764052391052246f,
+  //     0.40015721321105957f, 0, 0.978738009929657f,
+  //     0, 0, 0};
 
-  const std::vector<float> expected_values = {1.764052391052246f, 0.40015721321105957f, 0.978738009929657f};
-  const std::vector<int64_t> expected_linear_indices = {2, 3, 5};
+  constexpr std::array<float, 3> expected_values = {1.764052391052246f, 0.40015721321105957f, 0.978738009929657f};
+  constexpr std::array<int64_t, 3> expected_linear_indices = {2, 3, 5};
 
-  //sparse_initializer_as_output.onnx
+  // sparse_initializer_as_output.onnx
   SessionOptions so;
 
   // test if pre-allocated fetch is provided the initializer values are copied into that buffer
@@ -483,14 +582,18 @@ TEST(ExecutionFrameTestInit, SparseInitializerAsOutput) {
     ASSERT_STATUS_OK(session.Initialize());
 
     auto allocator = test::AllocatorManager::Instance().GetAllocator(CPU);
-    auto p_tensor = std::make_unique<SparseTensor>();
 
     std::vector<OrtValue> results;
     results.resize(1);
-    auto ml_type = DataTypeImpl::GetType<SparseTensor>();
-    results[0].Init(p_tensor.release(), ml_type, ml_type->GetDeleteFunc());
+
+    // Initialize the output value as a SparseTensor with pre-allocated memory
+    // this is done here to test output types.
+    auto element_type = DataTypeImpl::GetSparseTensorType<float>()->AsSparseTensorType()->GetElementType();
+    SparseTensor::InitOrtValue(element_type, TensorShape(dense_shape), allocator, results[0]);
+
     RunOptions ro;
-    ASSERT_STATUS_OK(session.Run(ro, {}, {}, {"values"}, &results, nullptr));
+    ASSERT_STATUS_OK(session.Run(ro, EmptySpan<std::string>(), EmptySpan<OrtValue>(),
+                                 AsSpan<std::string>({"values"}), &results, nullptr));
 
     ASSERT_TRUE(results[0].IsAllocated());
     ASSERT_TRUE(results[0].IsSparseTensor());
@@ -503,7 +606,7 @@ TEST(ExecutionFrameTestInit, SparseInitializerAsOutput) {
     EXPECT_THAT(coo_view.Indices().DataAsSpan<int64_t>(), ::testing::ContainerEq(gsl::make_span(expected_linear_indices)));
   }
 }
-#endif // !defined(DISABLE_SPARSE_TENSORS)
+#endif  // !defined(DISABLE_SPARSE_TENSORS)
 
 }  // namespace test
 }  // namespace onnxruntime

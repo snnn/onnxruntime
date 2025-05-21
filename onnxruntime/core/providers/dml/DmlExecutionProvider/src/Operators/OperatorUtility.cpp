@@ -3,7 +3,7 @@
 
 #include "precomp.h"
 #include "OperatorUtility.h"
-#include "core/providers/dml/OperatorAuthorHelper/OperatorRegistration.h"
+#include "core/providers/dml/OperatorAuthorHelper/OperatorVersions.h"
 
 namespace Dml
 {
@@ -123,7 +123,7 @@ namespace Dml
             }
         }
     } // namespace ActivationHelper
-    
+
     namespace FusionHelpers
     {
         struct OperatorInfo
@@ -132,6 +132,8 @@ namespace Dml
             std::string_view domain;
             int sinceVersion;
             std::vector<std::string_view> activationFilter;
+            bool enableOnMcdm;
+            std::vector<std::string_view> extraMcdmActivationFilter;
             std::optional<uint32_t> inputCountFilter;
         };
 
@@ -142,29 +144,32 @@ namespace Dml
 
         static const OperatorInfo c_fusableOps[] =
         {
-            OperatorInfo{ "Conv",                      onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Conv },
-            OperatorInfo{ "Conv",                      onnxruntime::kOnnxDomain, OnnxOperatorSet11::sc_sinceVer_Conv },
-            OperatorInfo{ "ConvTranspose",             onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_ConvTranspose },
-            OperatorInfo{ "ConvTranspose",             onnxruntime::kOnnxDomain, OnnxOperatorSet11::sc_sinceVer_ConvTranspose },
+            OperatorInfo{ "Conv",                      onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Conv, {}, true, {"Relu", "LeakyRelu"} },
+            OperatorInfo{ "Conv",                      onnxruntime::kOnnxDomain, OnnxOperatorSet11::sc_sinceVer_Conv, {}, true, {"Relu", "LeakyRelu"} },
+            OperatorInfo{ "ConvTranspose",             onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_ConvTranspose, {}, true, {"Relu", "LeakyRelu"} },
+            OperatorInfo{ "ConvTranspose",             onnxruntime::kOnnxDomain, OnnxOperatorSet11::sc_sinceVer_ConvTranspose, {}, true, {"Relu", "LeakyRelu"} },
             OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_BatchNormalization },
             OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_BatchNormalization },
+            OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OnnxOperatorSet14::sc_sinceVer_BatchNormalization },
+            OperatorInfo{ "BatchNormalization",        onnxruntime::kOnnxDomain, OnnxOperatorSet15::sc_sinceVer_BatchNormalization },
             OperatorInfo{ "InstanceNormalization",     onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_InstanceNormalization },
             OperatorInfo{ "MeanVarianceNormalization", onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_MeanVarianceNormalization },
             OperatorInfo{ "MeanVarianceNormalization", onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_MeanVarianceNormalization },
             OperatorInfo{ "MeanVarianceNormalization", onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_MeanVarianceNormalization },
-            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Gemm },
-            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_Gemm },
-            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet11::sc_sinceVer_Gemm },
-            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Gemm },
-            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_MatMul },
-            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_MatMul },
-            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_MatMul },
+            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet11::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "Gemm",                      onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Gemm, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_MatMul, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_MatMul, {}, true, {"Relu", "LeakyRelu"}  },
+            OperatorInfo{ "MatMul",                    onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_MatMul, {}, true, {"Relu", "LeakyRelu"}  },
 
             // The filter for activation functions maps to what DML's fused op internally fuses at the shader level.
-            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Add, {"Relu", "LeakyRelu"} },
-            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Add, {"Relu", "LeakyRelu"} },
-            OperatorInfo{ "Sum",                       onnxruntime::kOnnxDomain, OnnxOperatorSet8::sc_sinceVer_Sum, {"Relu", "LeakyRelu"}, 2 },
-            OperatorInfo{ "Sum",                       onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Sum, {"Relu", "LeakyRelu"}, 2 },
+            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Add, {"Relu", "LeakyRelu"}, true },
+            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Add, {"Relu", "LeakyRelu"}, true },
+            OperatorInfo{ "Add",                       onnxruntime::kOnnxDomain, OnnxOperatorSet14::sc_sinceVer_Add, {"Relu", "LeakyRelu"}, true },
+            OperatorInfo{ "Sum",                       onnxruntime::kOnnxDomain, OnnxOperatorSet8::sc_sinceVer_Sum, {"Relu", "LeakyRelu"}, true, {} , 2 },
+            OperatorInfo{ "Sum",                       onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Sum, {"Relu", "LeakyRelu"}, true, {} , 2 },
         };
 
         // Not all activations can be fused - only simple elementwise activations (i.e. activation functions which
@@ -179,9 +184,12 @@ namespace Dml
             OperatorInfo{ "ScaledTanh",         onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_ScaledTanh },
             OperatorInfo{ "Relu",               onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Relu },
             OperatorInfo{ "Relu",               onnxruntime::kOnnxDomain, OnnxOperatorSet13::sc_sinceVer_Relu },
+            OperatorInfo{ "Relu",               onnxruntime::kOnnxDomain, OnnxOperatorSet14::sc_sinceVer_Relu },
             OperatorInfo{ "LeakyRelu",          onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_LeakyRelu },
+            OperatorInfo{ "LeakyRelu",          onnxruntime::kOnnxDomain, OnnxOperatorSet16::sc_sinceVer_LeakyRelu },
             OperatorInfo{ "PRelu",              onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_PRelu },
             OperatorInfo{ "PRelu",              onnxruntime::kOnnxDomain, OnnxOperatorSet9::sc_sinceVer_PRelu },
+            OperatorInfo{ "PRelu",              onnxruntime::kOnnxDomain, OnnxOperatorSet16::sc_sinceVer_PRelu },
             OperatorInfo{ "ThresholdedRelu",    onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_ThresholdedRelu },
             OperatorInfo{ "ThresholdedRelu",    onnxruntime::kOnnxDomain, OnnxOperatorSet10::sc_sinceVer_ThresholdedRelu },
             OperatorInfo{ "Elu",                onnxruntime::kOnnxDomain, OnnxOperatorSet7::sc_sinceVer_Elu },
@@ -199,7 +207,8 @@ namespace Dml
             int candidateOpInputCount,
             std::string_view activationOpType,
             std::string_view activationOpDomain,
-            int activationOpSinceVersion)
+            int activationOpSinceVersion,
+            bool isMcdmDevice)
         {
             auto opIt = std::find(
                 std::begin(c_fusableOps),
@@ -221,10 +230,24 @@ namespace Dml
                 return std::nullopt;
             }
 
-            if (!opIt->activationFilter.empty() && 
+            if (!opIt->activationFilter.empty() &&
                 std::find(opIt->activationFilter.begin(), opIt->activationFilter.end(), activationOpType) ==  opIt->activationFilter.end())
             {
                 return std::nullopt;
+            }
+
+            if (isMcdmDevice)
+            {
+                if (!opIt->enableOnMcdm)
+                {
+                    return std::nullopt;
+                }
+                
+                if (!opIt->extraMcdmActivationFilter.empty() &&
+                    std::find(opIt->extraMcdmActivationFilter.begin(), opIt->extraMcdmActivationFilter.end(), activationOpType) ==  opIt->extraMcdmActivationFilter.end())
+                {
+                    return std::nullopt;
+                }
             }
 
             if (opIt->inputCountFilter && *opIt->inputCountFilter != static_cast<uint32_t>(candidateOpInputCount))
@@ -232,8 +255,8 @@ namespace Dml
                 return std::nullopt;
             }
 
-            // All fused ops just have "Fused" prepended to their name (e.g. "Conv" -> "FusedConv").
-            std::string fusedOpType = std::string("Fused").append(candidateOpType);
+            // All fused ops have "DmlFused" prepended to their name (e.g. "Conv" -> "DmlFusedConv").
+            std::string fusedOpType = std::string("DmlFused").append(candidateOpType);
 
             return FusedOpProperties{ std::move(fusedOpType), onnxruntime::kMSDmlDomain };
         }
@@ -342,6 +365,35 @@ namespace Dml
             return activation;
         }
 
+        std::optional<ActivationOperatorDescWrapper> TryGetGraphFusedActivationDesc(const MLOperatorKernelCreationContext& kernelInfo)
+        {
+            if (!kernelInfo.HasAttribute(AttrName::GraphFusedActivation, MLOperatorAttributeType::String))
+            {
+                return std::nullopt; // No activation
+            }
+
+            auto activationName = kernelInfo.GetAttribute(AttrName::GraphFusedActivation);
+            ActivationOperatorDescWrapper activation = {};
+
+            if (activationName == "Softmax")
+            {
+                const uint32_t onnxDimCount = gsl::narrow_cast<uint32_t>(kernelInfo.GetTensorShapeDescription().GetInputTensorShape(0).size());
+                int onnxAxis = HandleNegativeAxis(kernelInfo.GetOptionalAttribute<int>(AttrName::GraphFusedAxis, -1), onnxDimCount);
+
+                auto dmlAdjustedAxis = GetDmlAdjustedAxis(onnxAxis, onnxDimCount, kernelInfo.GetTensorShapeDescription().GetInputTensorDimensionCount(0));
+                activation.desc.activationType = DML_OPERATOR_ACTIVATION_SOFTMAX1;
+                activation.dmlAxes.push_back(dmlAdjustedAxis);
+                activation.desc.params.softmax1.Axes = activation.dmlAxes.data();
+                activation.desc.params.softmax1.AxisCount = gsl::narrow_cast<uint32_t>(activation.dmlAxes.size());
+            }
+            else
+            {
+                ML_INVALID_ARGUMENT("Unsupported activation function.");
+            }
+
+            return activation;
+        }
+
         /*static*/ std::string GetFusedAttributeName(std::string_view name)
         {
             return std::string("fused_").append(name);
@@ -384,9 +436,9 @@ namespace Dml
 
     } // namespace FusionHelpers
 
-    uint32_t GetDmlAdjustedAxis(int32_t onnxAxis, const MLOperatorKernelCreationContext& kernelCreationContext, uint32_t dmlDimCount)
+    uint32_t GetDmlAdjustedAxis(int32_t onnxAxis, const MLOperatorKernelCreationContext& kernelCreationContext, uint32_t dmlDimCount, uint32_t firstInputIndex)
     {
-        const std::vector<DimensionType> inputDimensions = kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(0);
+        const std::vector<DimensionType> inputDimensions = kernelCreationContext.GetTensorShapeDescription().GetInputTensorShape(firstInputIndex);
         uint32_t onnxDimCount = gsl::narrow_cast<uint32_t>(inputDimensions.size());
         onnxAxis = HandleNegativeAxis(onnxAxis, onnxDimCount);
         return GetDmlAdjustedAxis(onnxAxis, onnxDimCount, dmlDimCount);
@@ -446,7 +498,7 @@ namespace Dml
             return *index;
         }
         ML_INVALID_ARGUMENT("Unknown interpolation mode");
-        return (DML_INTERPOLATION_MODE)0;
+        return static_cast<DML_INTERPOLATION_MODE>(0);
     }
     #pragma warning(pop)
 
@@ -464,7 +516,7 @@ namespace Dml
             return *index;
         }
         ML_INVALID_ARGUMENT("Unknown depth/space order");
-        return (DML_DEPTH_SPACE_ORDER)0;
+        return static_cast<DML_DEPTH_SPACE_ORDER>(0);
     }
     #pragma warning(pop)
 

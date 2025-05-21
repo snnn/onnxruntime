@@ -3,15 +3,15 @@
 
 #include <type_traits>
 
-#include "gsl/gsl"
+#include <gsl/gsl>
 
 #include "core/common/common.h"
 #include "core/framework/data_types.h"
 #include "core/framework/element_type_lists.h"
+#include "core/framework/math.h"
 #include "core/framework/op_kernel.h"
 #include "core/providers/op_kernel_type_control.h"
 #include "core/util/math.h"
-#include "core/util/math_cpuonly.h"
 
 using namespace ::onnxruntime::common;
 using namespace ONNX_NAMESPACE;
@@ -22,8 +22,6 @@ ORT_SPECIFY_OP_KERNEL_ARG_DEFAULT_TYPE_LIST_ALL_OPSETS(
     kCpuExecutionProvider, kOnnxDomain, Sign, Input, 0, element_type_lists::AllNumeric);
 }
 
-using SignDataTypes = ORT_OP_KERNEL_ARG_DEFAULT_TYPE_LIST_ALL_OPSETS(
-    kCpuExecutionProvider, kOnnxDomain, Sign, Input, 0);
 using EnabledSignDataTypes = ORT_OP_KERNEL_ARG_ENABLED_TYPE_LIST_ALL_OPSETS(
     kCpuExecutionProvider, kOnnxDomain, Sign, Input, 0);
 
@@ -39,7 +37,6 @@ ONNX_CPU_OPERATOR_VERSIONED_KERNEL(
     9,
     12,
     KernelDefBuilder().TypeConstraint("T",
-                                      BuildKernelDefConstraintsFromTypeList<SignDataTypes>(),
                                       BuildKernelDefConstraintsFromTypeList<EnabledSignDataTypes>()),
     Sign);
 
@@ -47,7 +44,6 @@ ONNX_CPU_OPERATOR_KERNEL(
     Sign,
     13,
     KernelDefBuilder().TypeConstraint("T",
-                                      BuildKernelDefConstraintsFromTypeList<SignDataTypes>(),
                                       BuildKernelDefConstraintsFromTypeList<EnabledSignDataTypes>()),
     Sign);
 
@@ -59,29 +55,15 @@ struct CallSignImpl {
   }
 };
 
-// The spec does not specify how NaN is
-// treated but we have to treat it somehow. We choose
-// to return 0 for NaN as TF does.
-template <class T>
-inline T FloatingImpl(T val) {
-  if (std::isnan(val) || val == T(0)) {
-    return T(0);
-  }
-  if (val > T(0)) {
-    return T(1);
-  } else {
-    return T(-1);
-  }
-}
-
 template <>
 struct CallSignImpl<MLFloat16> {
   void operator()(const Tensor* input, Tensor* output) const {
-    auto span = gsl::make_span(input->Data<MLFloat16>(), input->Shape().Size());
-    auto output_data = output->template MutableData<MLFloat16>();
-    std::transform(span.cbegin(), span.cend(), output_data, [](const MLFloat16& val) {
-      float fl = math::halfToFloat(val.val);
-      return MLFloat16(math::floatToHalf(FloatingImpl(fl)));
+    auto span = input->DataAsSpan<MLFloat16>();
+    auto output_data = output->MutableData<MLFloat16>();
+    std::transform(span.begin(), span.end(), output_data, [](const MLFloat16& val) {
+      // Return 0 as TF does for NaN.
+      if (val.IsNaNOrZero()) return MLFloat16::Zero;
+      return (val.IsNegative()) ? MLFloat16::MinusOne : MLFloat16::One;
     });
   }
 };
@@ -89,11 +71,12 @@ struct CallSignImpl<MLFloat16> {
 template <>
 struct CallSignImpl<BFloat16> {
   void operator()(const Tensor* input, Tensor* output) const {
-    auto span = gsl::make_span(input->Data<BFloat16>(), input->Shape().Size());
-    auto output_data = output->template MutableData<BFloat16>();
-    std::transform(span.cbegin(), span.cend(), output_data, [](const BFloat16& val) {
-      float fl = val.ToFloat();
-      return BFloat16(FloatingImpl(fl));
+    auto span = input->DataAsSpan<BFloat16>();
+    auto output_data = output->MutableData<BFloat16>();
+    std::transform(span.begin(), span.end(), output_data, [](const BFloat16& val) {
+      // Return 0 as TF does for NaN.
+      if (val.IsNaNOrZero()) return BFloat16::Zero;
+      return (val.IsNegative()) ? BFloat16::MinusOne : BFloat16::One;
     });
   }
 };

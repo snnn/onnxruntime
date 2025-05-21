@@ -2,17 +2,23 @@
 // Licensed under the MIT License.
 
 #pragma once
-#include <onnx/onnx_pb.h>
+#include "core/graph/onnx_protobuf.h"
 #include <unordered_set>
 
+#include "core/common/inlined_containers_fwd.h"
 #include "core/graph/basic_types.h"
 #include "core/providers/nnapi/nnapi_builtin/model.h"
 #include "core/providers/nnapi/nnapi_builtin/nnapi_lib/NeuralNetworksWrapper.h"
+#include "core/providers/nnapi/nnapi_builtin/nnapi_api_helper.h"
 #include "shaper.h"
 
+struct NnApi;
 namespace onnxruntime {
-
+namespace logging {
+class Logger;
+}
 class GraphViewer;
+enum class DataLayout;
 class NodeUnit;
 class Node;
 class NodeArg;
@@ -26,29 +32,16 @@ class ModelBuilder {
  public:
   using Shape = Shaper::Shape;
 
-  enum class TargetDeviceOption : int8_t {
-    ALL_DEVICES,  // use all avaliable target devices
-
-    /* TODO support these options
-    PREFERRED_DEVICES,  // Use one or more preferred devices (must be given)
-    EXCLUDED_DEVICES,   // Exclude one or more devices (must be given)
-     */
-
-    CPU_DISABLED,  // use all avaliable target devices except CPU
-    CPU_ONLY,      // use CPU only
-  };
-
-  ModelBuilder(const GraphViewer& graph_viewer);
+  ModelBuilder(const GraphViewer& graph_viewer, const NnApi& nnapi_handle,
+               gsl::span<const DeviceWrapper> nnapi_target_devices, TargetDeviceOption target_device_option,
+               const logging::Logger& logger);
 
   common::Status Compile(std::unique_ptr<Model>& model);
 
-  int32_t GetNNAPIFeatureLevel() const;
-
   // Add an NNAPI operation (operator)
-  common::Status AddOperation(int op, const std::vector<uint32_t>& input_indices,
+  common::Status AddOperation(int op, const InlinedVector<uint32_t>& input_indices,
                               const std::vector<std::string>& output_names,
-                              const std::vector<android::nn::wrapper::OperandType>& types,
-                              const std::vector<bool>& is_nhwc_vec);
+                              const std::vector<android::nn::wrapper::OperandType>& output_types);
 
   // Find if the given node_unit has a fuseable activation (Relu/Relu1/Relu6)
   // For now we only support node_unit with a single output
@@ -69,8 +62,7 @@ class ModelBuilder {
 
   // Register informations for a particular operand
   void RegisterOperand(const std::string& name, uint32_t index,
-                       const android::nn::wrapper::OperandType& operand_type,
-                       bool is_nhwc);
+                       const android::nn::wrapper::OperandType& operand_type);
 
   // Generate an unique name for intermediate result
   std::string GetUniqueName(const std::string& base_name);
@@ -79,15 +71,16 @@ class ModelBuilder {
   void SetUseNCHW(bool use_nchw) { use_nchw_ = use_nchw; }
   bool UseNCHW() const { return use_nchw_; }
 
+  // Returns the preferred layout for this EP.
+  DataLayout GetPreferredLayout() const;
+
   // Relax fp32 computation to fp16
   // It is off by default
   void SetUseFp16(bool use_fp16) { use_fp16_ = use_fp16; }
 
-  void SetTargetDeviceOption(TargetDeviceOption option) { target_device_option_ = option; }
-
   // Set NNAPI execution preference
-  // Default preference is PREFER_SUSTAINED_SPEED
-  void ExecutePreference(
+  // Default preference is PREFER_FAST_SINGLE_ANSWER
+  void SetExecutePreference(
       android::nn::wrapper::ExecutePreference pref) { exe_pref_ = pref; }
 
   // Accessors for members
@@ -104,25 +97,28 @@ class ModelBuilder {
 
   const InitializedTensorSet& GetInitializerTensors() const;
 
+  const ONNX_NAMESPACE::TensorProto* GetConstantInitializer(const std::string& name) const;
+
   const GraphViewer& GetGraphViewer() const { return graph_viewer_; }
 
-  void RegisterNHWCOperand(const std::string& name);
-  bool IsOperandNHWC(const std::string& name) const;
-
-  // Get the operand transposed to nchw/nhwc from given nhwc/nchw operand, if it exists
-  bool GetNCHWOperand(const std::string& nhwc_name, std::string& nchw_name);
-  bool GetNHWCOperand(const std::string& nchw_name, std::string& nhwc_name);
-
   // Get the NodeUnit which contains the given node
+  // the given node must be in the underlying graph_viewer
   const NodeUnit& GetNodeUnit(const Node* node) const;
 
-  common::Status SetNHWCToNCHWOperandMap(const std::string& nhwc_name,
-                                         const std::string& nchw_name);
-  common::Status SetNCHWToNHWCOperandMap(const std::string& nchw_name,
-                                         const std::string& nhwc_name);
+  int32_t GetEffectiveFeatureLevel() const { return nnapi_effective_feature_level_; }
 
+#ifndef NDEBUG
+  // Set the node index to be tracked
+  // For now, NNAPI is a black box, LOGs are limited and this EP is hard to debug.
+  // ONNX node and NNAPI node are not a 1:1 mapping, like batch-normalization.
+  // We use this to track a specific ONNX node which we are processing and record the detail mapping relationship.
+  // So we can log out each NNAPI OP status during model-building and compiling.
+  void SetDebugCurrentOnnxNodeIndex(const size_t node_index) {
+    current_onnx_node_index_ = node_index;
+  }
+#endif
  private:
-  const NnApi* nnapi_{nullptr};
+  const NnApi& nnapi_;
   const GraphViewer& graph_viewer_;
   std::unique_ptr<Model> nnapi_model_;
 
@@ -141,22 +137,15 @@ class ModelBuilder {
   std::unordered_set<std::string> operands_;
   std::unordered_set<std::string> fused_activations_;
 
-  std::unordered_set<std::string> skipped_initializers_;
+  std::unordered_map<std::string, int> initializer_usage_;
 
   // All activation nodes (Relu, Relu1, Relu6) as a map <const NodeUnit*, activation_code>
   std::unordered_map<const NodeUnit*, int32_t> activation_node_units_;
 
   std::unordered_map<std::string, std::shared_ptr<IOpSupportChecker>> op_support_checkers_;
 
-  // Operands in nhwc
-  std::unordered_set<std::string> nhwc_operands_;
-
-  // Maps between nhwc and nchw, and vice versa
-  std::unordered_map<std::string, std::string> nhwc_to_nchw_map_;
-  std::unordered_map<std::string, std::string> nchw_to_nhwc_map_;
-
-  std::vector<uint32_t> input_index_vec_;
-  std::vector<uint32_t> output_index_vec_;
+  InlinedVector<uint32_t> input_index_vec_;
+  InlinedVector<uint32_t> output_index_vec_;
 
   // Contains all quantized operators' input and the NodeUnit(s) using the input
   // In the form of {input_name, [NodeUnit(s) using the input]}
@@ -169,18 +158,29 @@ class ModelBuilder {
 
   std::unordered_set<std::string> unique_names_;
 
-  TargetDeviceOption target_device_option_{TargetDeviceOption::ALL_DEVICES};
-  std::vector<ANeuralNetworksDevice*> nnapi_target_devices_;
-  std::string nnapi_target_devices_detail_;  // Debug info for target devices
+  gsl::span<const DeviceWrapper> nnapi_target_devices_;
 
+  const TargetDeviceOption target_device_option_;
+  // The effective feature_level, which decides if we can run this node on NNAPI
+  // We are not gonna use CPU even it has a higher feature level
+  int32_t nnapi_effective_feature_level_ = 0;
   // The number of nnapi operations in this model
   size_t num_nnapi_ops_ = 0;
   uint32_t next_index_ = 0;
 
-  // Convert the onnx model to ANeuralNetworksModel
-  common::Status Prepare();
+#ifndef NDEBUG
+  // To track and record current node index for debugging
+  size_t current_onnx_node_index_ = 0;
+  // <ONNX node index ,nnapi operation index>
+  // An ONNX node might be decomposed into multiple nnapi operations
+  // <1,1> <1,2> <1,3>
+  InlinedVector<std::pair<size_t, int32_t>> operations_recorder_;
+#endif
 
-  common::Status GetTargetDevices();
+  const logging::Logger& logger_;
+
+  // Convert the ONNX model to ANeuralNetworksModel
+  common::Status Prepare();
 
   // If a NNAPI operation will use initializers directly, we will add the initializers to the skip list
   void PreprocessInitializers();
@@ -191,8 +191,6 @@ class ModelBuilder {
   common::Status RegisterModelInputs();
   common::Status AddOperations();
   common::Status RegisterModelOutputs();
-  // After constructing the NNAPI model, will set the shape inferencing record to the Model
-  void RegisterModelShaper();
 
   // Get all quantized inputs in the underlying graph_viewer
   void GetAllQuantizedOpInputs();
@@ -206,7 +204,6 @@ class ModelBuilder {
   common::Status AddNewNNAPIOperand(const android::nn::wrapper::OperandType& type, uint32_t& index);
   common::Status AddNewOperand(const std::string& name,
                                const android::nn::wrapper::OperandType& operand_type,
-                               bool is_nhwc,
                                uint32_t& index);
 
   static const IOpBuilder* GetOpBuilder(const NodeUnit& node_unit);

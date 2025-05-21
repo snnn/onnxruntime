@@ -14,7 +14,7 @@
 
 using namespace onnxruntime;
 
-OnnxModelInfo::OnnxModelInfo(_In_ const PATH_CHAR_TYPE* model_url, bool is_ort_model)
+OnnxModelInfo::OnnxModelInfo(const std::filesystem::path& model_url, bool is_ort_model)
     : model_url_(model_url) {
   if (is_ort_model) {
     InitOrtModelInfo(model_url);
@@ -38,7 +38,7 @@ static void RepeatedPtrFieldToVector(const ::google::protobuf::RepeatedPtrField<
   }
 }
 
-void OnnxModelInfo::InitOnnxModelInfo(_In_ const PATH_CHAR_TYPE* model_url) {  // parse model
+void OnnxModelInfo::InitOnnxModelInfo(const std::filesystem::path& model_url) {  // parse model
   int model_fd;
   auto st = Env::Default().FileOpenRd(model_url, model_fd);
   if (!st.IsOK()) {
@@ -50,7 +50,9 @@ void OnnxModelInfo::InitOnnxModelInfo(_In_ const PATH_CHAR_TYPE* model_url) {  /
   const bool parse_result = model_pb.ParseFromZeroCopyStream(&input) && input.GetErrno() == 0;
   if (!parse_result) {
     (void)Env::Default().FileClose(model_fd);
-    ORT_THROW("Failed to load model because protobuf parsing failed.");
+    std::ostringstream oss;
+    oss << "Failed to load model from " << model_url << " because protobuf parsing failed.";
+    ORT_THROW(oss.str());
   }
   (void)Env::Default().FileClose(model_fd);
   {
@@ -58,15 +60,13 @@ void OnnxModelInfo::InitOnnxModelInfo(_In_ const PATH_CHAR_TYPE* model_url) {  /
     const std::string model_url_string = ToUTF8String(model_url);
     re2::StringPiece text(model_url_string);
     re2::StringPiece submatch;
-    re2::RE2 regex("onnx[0-9a-z]{3}", re2::RE2::Options());  //e.g. onnx141, onnx150, onnxtip
-    if (!regex.ok()) {
-      ORT_THROW("Failed to parse regex: onnx[0-9a-z]{3}");
-    }
-    bool match = regex.Match(text, 0, text.length(), re2_anchor, &submatch, 1);
+    re2::RE2 regex_op("opset[0-9a-z]{1,2}", re2::RE2::Options());  // e.g. opset14, opset15
+
+    bool match = regex_op.Match(text, 0, text.length(), re2_anchor, &submatch, 1);
     if (match) {
-      onnx_commit_tag_.assign(submatch.data(), submatch.length());
+      onnx_nominal_opset_vesion_.assign(submatch.data(), submatch.length());
     } else {
-      onnx_commit_tag_ = TestModelInfo::unknown_version;
+      onnx_nominal_opset_vesion_ = TestModelInfo::unknown_version;
     }
   }
   for (const auto& opset : model_pb.opset_import()) {
@@ -83,7 +83,7 @@ void OnnxModelInfo::InitOnnxModelInfo(_In_ const PATH_CHAR_TYPE* model_url) {  /
     if (!init.has_name()) continue;
     initializer_names.insert(init.name());
   }
-  //Ignore the inputs that are already in initializers
+  // Ignore the inputs that are already in initializers
   for (const auto& p : graph.input()) {
     if (!p.has_name()) ORT_THROW("input without name??");
     if (initializer_names.find(p.name()) == initializer_names.end()) input_value_info_.push_back(p);
@@ -93,7 +93,7 @@ void OnnxModelInfo::InitOnnxModelInfo(_In_ const PATH_CHAR_TYPE* model_url) {  /
 
 #endif  // #if !defined(ORT_MINIMAL_BUILD)
 
-void OnnxModelInfo::InitOrtModelInfo(_In_ const PATH_CHAR_TYPE* model_url) {
+void OnnxModelInfo::InitOrtModelInfo(const std::filesystem::path& model_url) {
   std::vector<uint8_t> bytes;
   size_t num_bytes = 0;
   const auto model_location = ToWideString(model_url);
@@ -101,9 +101,6 @@ void OnnxModelInfo::InitOrtModelInfo(_In_ const PATH_CHAR_TYPE* model_url) {
   bytes.resize(num_bytes);
   std::ifstream bytes_stream(model_location, std::ifstream::in | std::ifstream::binary);
   bytes_stream.read(reinterpret_cast<char*>(bytes.data()), num_bytes);
-
-  // TODO use ort format version here?
-  onnx_commit_tag_ = TestModelInfo::unknown_version;
 
   // TODO, verify it is a valid ort format
   // TODO, version matches the ORT version

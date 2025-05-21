@@ -11,11 +11,11 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 // See the LICENSE file in the project root for more information.
 
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using Xunit;
-using System;
 
 namespace Microsoft.ML.OnnxRuntime.Tensors.Tests
 {
@@ -159,7 +159,12 @@ namespace Microsoft.ML.OnnxRuntime.Tensors.Tests
             Assert.Equal(24, tensor.Length);
             Assert.Equal(tensorConstructor.IsReversedStride, tensor.IsReversedStride);
 
-            Assert.Throws<ArgumentNullException>("dimensions", () => tensorConstructor.CreateFromDimensions<int>(dimensions: null));
+            // The null is converted to a 'null' ReadOnlySpan<T> which is a valid instance with length zero.
+            // https://learn.microsoft.com/en-us/dotnet/api/system.readonlyspan-1.-ctor?view=netstandard-2.1#system-readonlyspan-1-ctor(-0())
+            // Such a span is valid as dimensions as it represents a scalar. 
+            // If we need to differentiate between the two we'd need to change the Tensor ctor to accept a
+            // nullable span in order to tell the user that's invalid. 
+            // Assert.Throws<ArgumentNullException>("dimensions", () => tensorConstructor.CreateFromDimensions<int>(dimensions: null));
             Assert.Throws<ArgumentOutOfRangeException>("dimensions", () => tensorConstructor.CreateFromDimensions<int>(dimensions: new[] { 1, -1 }));
 
             // ensure dimensions are immutable
@@ -2175,10 +2180,13 @@ namespace Microsoft.ML.OnnxRuntime.Tensors.Tests
         {22,23}
     }
 }";
+            // remove \r so the newlines are just \n on all platforms
+            expected = expected.Replace("\r", "");
+            var actual= tensor.GetArrayString().Replace("\r", "");
 
-            Assert.Equal(expected, tensor.GetArrayString());
+            Assert.Equal(expected, actual);
 
-            var expectedNoSpace = expected.Replace(Environment.NewLine, "").Replace(" ", "");
+            var expectedNoSpace = expected.Replace("\n", "").Replace(" ", "");
             Assert.Equal(expectedNoSpace, tensor.GetArrayString(false));
         }
 
@@ -2215,7 +2223,9 @@ namespace Microsoft.ML.OnnxRuntime.Tensors.Tests
                 new[] { 0, 0, 1, 2, 3, 4, 5, 6 };
             Assert.Equal(expected, actual);
 
+#pragma warning disable CS8625 // Cannot convert null literal to non-nullable reference type.
             Assert.Throws<ArgumentNullException>(() => tensorCollection.CopyTo(null, 0));
+#pragma warning restore CS8625 // Cannot convert null literal to non-nullable reference type.
             Assert.Throws<ArgumentException>(() => tensorCollection.CopyTo(new int[3, 4], 0));
             Assert.Throws<ArgumentException>(() => tensorCollection.CopyTo(new int[5], 0));
             Assert.Throws<ArgumentException>(() => tensorCollection.CopyTo(new int[6], 1));
@@ -2306,7 +2316,9 @@ namespace Microsoft.ML.OnnxRuntime.Tensors.Tests
                 new[] { 0, 0, 1, 2, 3, 4, 5, 6 };
             Assert.Equal(expected, actual);
 
+#pragma warning disable CS8625 // Cannot convert null literal to non-nullable reference type.
             Assert.Throws<ArgumentNullException>(() => tensorCollection.CopyTo(null, 0));
+#pragma warning restore CS8625 // Cannot convert null literal to non-nullable reference type.
             Assert.Throws<ArgumentException>(() => tensorCollection.CopyTo(new int[5], 0));
             Assert.Throws<ArgumentException>(() => tensorCollection.CopyTo(new int[6], 1));
 

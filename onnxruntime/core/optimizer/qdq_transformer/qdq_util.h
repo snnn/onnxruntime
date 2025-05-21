@@ -5,6 +5,7 @@
 
 #include <functional>
 #include <string>
+#include <filesystem>
 
 namespace ONNX_NAMESPACE {
 class TensorProto;
@@ -14,11 +15,12 @@ namespace onnxruntime {
 
 class Node;
 class Path;
+class Graph;
 
 namespace QDQ {
 
-static constexpr const char* QOpName = "QuantizeLinear";
-static constexpr const char* DQOpName = "DequantizeLinear";
+constexpr const char* QOpName = "QuantizeLinear";
+constexpr const char* DQOpName = "DequantizeLinear";
 
 enum InputIndex : int {
   INPUT_ID = 0,
@@ -27,21 +29,57 @@ enum InputIndex : int {
   TOTAL_COUNT = 3,
 };
 
-// Check if Q/DQ pair is supported in the QDQ transformer. It requires:
+using GetConstantInitializerFn = std::function<const ONNX_NAMESPACE::TensorProto*(const std::string&)>;
+
+// Check if Q/DQ pair is supported in extended level QDQ transformers. It requires:
 // 1. Q/DQ doesn't have optional input.
 // 2. scale and zero point is constant scalar
 // 3. Q and DQ have same scale and zero point
 bool IsQDQPairSupported(
     const Node& q_node, const Node& dq_node,
-    const std::function<const ONNX_NAMESPACE::TensorProto*(const std::string&)>& get_const_initializer,
-    const Path& model_path);
+    const GetConstantInitializerFn& get_const_initializer,
+    const std::filesystem::path& model_path,
+    bool check_op_type = true);
 
-// Check if DQ is supported in the QDQ transformer. It requires:
+// Check if a DQ -> Q sequence represents a conversion in quantization data type.
+// Example of uint8 to uint16:
+//     Dequantize (uint8 to float) -> Quantize (float to uint16)
+// Requires:
+// 1. Q/DQ doesn't have optional input.
+// 2. scale and zero-point are constant scalars.
+// 3. Q and DQ have the same scale *type* and different zero-point *types*.
+bool IsDQQConversion(
+    const Node& dq_node, const Node& q_node,
+    const GetConstantInitializerFn& get_const_initializer,
+    const std::filesystem::path& model_path);
+
+// Check if DQ is supported in extended level QDQ transformers. It requires:
 // 1. DQ doesn't have optional input.
 // 2. scale and zero point is constant scalar
-bool IsDQSupported(
-    const Node& dq_node,
-    const std::function<const ONNX_NAMESPACE::TensorProto*(const std::string&)>& get_const_initializer);
+bool IsDQSupported(const Node& dq_node, const GetConstantInitializerFn& get_const_initializer);
+
+// Check if Q or DQ node's scale and zero point inputs are constant scalars.
+// If the zero point input does not exist, it is assumed to have a default scalar value.
+// `zero_point_exists` will indicate if it does exist.
+bool QOrDQNodeHasConstantScalarScaleAndZeroPoint(
+    const Node& q_or_dq_node,
+    const GetConstantInitializerFn& get_const_initializer,
+    bool& zero_point_exists);
+
+// Checks that the y_scale/x_scale input to the QuantizeLinear/DequantizeLinear node is a positive scalar.
+bool IsQOrDQScalePositiveConstantScalar(const Node& q_or_dq_node, const GetConstantInitializerFn& get_const_initializer,
+                                        const std::filesystem::path& model_path);
+
+#if !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
+// Check Q node op type, version, and domain.
+bool MatchQNode(const Node& node);
+
+// Check DQ node op type, version, and domain.
+bool MatchDQNode(const Node& node);
+#endif  // !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
+
+// Check if an clip node is made redundant by Q node.
+bool IsClipMadeRedundantByQ(const Graph& graph, const Node& clip_node, const Node& q_node);
 
 }  // namespace QDQ
 }  // namespace onnxruntime

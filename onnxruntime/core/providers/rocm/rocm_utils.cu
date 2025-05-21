@@ -30,22 +30,23 @@ template <typename T>
 void Fill(hipStream_t stream, T* output, T value, int64_t count) {
   int blocksPerGrid = static_cast<int>(CeilDiv(count, GridDim::maxThreadsPerBlock * GridDim::maxElementsPerThread));
   HIP_LONG N = static_cast<HIP_LONG>(count);
-  hipLaunchKernelGGL(HIP_KERNEL_NAME(_Fill<T, GridDim::maxThreadsPerBlock, GridDim::maxElementsPerThread>), dim3(blocksPerGrid), dim3(GridDim::maxThreadsPerBlock), 0, stream, output, value, N);
+  _Fill<T, GridDim::maxThreadsPerBlock, GridDim::maxElementsPerThread>
+      <<<blocksPerGrid, GridDim::maxThreadsPerBlock, 0, stream>>>(output, value, N);
 }
 template <typename T>
 class ConstantBufferImpl : public IConstantBuffer<T> {
  public:
-  ConstantBufferImpl(T val) : val_(val), buffer_(nullptr), count_(0) {
+  ConstantBufferImpl(T val) : buffer_(nullptr), count_(0), val_(val) {
   }
   ~ConstantBufferImpl() {
     if (buffer_)
-      hipFree(buffer_);
+      HIP_CALL_THROW(hipFree(buffer_));
   }
 
   virtual const T* GetBuffer(hipStream_t stream, size_t count) {
     if (count > count_) {
       if (buffer_) {
-        hipFree(buffer_);
+        HIP_CALL_THROW(hipFree(buffer_));
         buffer_ = nullptr;
       }
       HIP_CALL_THROW(hipMalloc(&buffer_, count * sizeof(T)));
@@ -70,6 +71,7 @@ std::unique_ptr<IConstantBuffer<T>> CreateConstantOnes() {
 template std::unique_ptr<IConstantBuffer<float>> CreateConstantOnes<float>();
 template std::unique_ptr<IConstantBuffer<double>> CreateConstantOnes<double>();
 template std::unique_ptr<IConstantBuffer<half>> CreateConstantOnes<half>();
+template std::unique_ptr<IConstantBuffer<BFloat16>> CreateConstantOnes<BFloat16>();
 
 #define SPECIALIZED_FILL(T) \
   template void Fill<T>(hipStream_t stream, T * output, T value, int64_t count);
@@ -81,6 +83,7 @@ SPECIALIZED_FILL(int64_t)
 SPECIALIZED_FILL(float)
 SPECIALIZED_FILL(double)
 SPECIALIZED_FILL(__half)
+SPECIALIZED_FILL(BFloat16)
 
 }  // namespace rocm
 }  // namespace onnxruntime

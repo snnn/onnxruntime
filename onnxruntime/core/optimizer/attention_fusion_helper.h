@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
+#include <limits>
 #include "onnx/defs/shape_inference.h"
 #include "onnx/defs/tensor_proto_util.h"
 #include "core/framework/tensorprotoutils.h"
@@ -16,14 +17,15 @@ namespace onnxruntime {
 namespace AttentionFusionHelper {
 
 struct MatchGemmResult {
-  const Node* gemm = nullptr;                     // the Gemm node.
+  const Node* gemm = nullptr;           // the Gemm node.
   const Node* input_node = nullptr;     // one node in the subgraph that accept the input.
-  const Node* output_node = nullptr;              // the node that have output of the subgraph.
+  const Node* output_node = nullptr;    // the node that have output of the subgraph.
   std::vector<NodeIndex> node_indices;  // id of all nodes.
 };
 
 // Compare the expected parameters (starts, ends, axes and step)
-bool CheckSliceParameters(const Graph& graph, const Node& slice, const std::vector<int>& input_indices, const std::vector<int64_t>& expected_values, const logging::Logger& logger) {
+bool CheckSliceParameters(const Graph& graph, const Node& slice, const std::vector<int>& input_indices,
+                          const std::vector<int64_t>& expected_values, const logging::Logger& logger) {
   ORT_ENFORCE(input_indices.size() == expected_values.size() && input_indices.size() > 0);
 
   // Here assumes that the last element of input_indices is the maximum one.
@@ -35,7 +37,7 @@ bool CheckSliceParameters(const Graph& graph, const Node& slice, const std::vect
   for (size_t i = 0; i < expected_values.size(); i++) {
     const NodeArg& input = *(slice.InputDefs()[input_indices[i]]);
     if (expected_values[i] >= static_cast<int64_t>(INT_MAX)) {
-      std::vector<int64_t> ends;
+      InlinedVector<int64_t> ends;
       if (!(optimizer_utils::AppendTensorFromInitializer(graph, input, ends, true) && ends.size() == 1 && ends[0] >= INT_MAX)) {
         DEBUG_LOG("Slice ends is less than INT_MAX");
         return false;
@@ -199,7 +201,7 @@ bool MatchGemmSubgraph(Graph& graph,
       return false;
     }
 
-    std::vector<int64_t> axes;
+    InlinedVector<int64_t> axes;
     if (!(graph_utils::GetRepeatedNodeAttributeValues(unsqueeze_after_gather, "axes", axes) && axes.size() == 1 && axes[0] == 0)) {
       DEBUG_LOG("unsqueeze_after_gather axes value not expected");
       return false;
@@ -265,7 +267,8 @@ bool ValidateGemmInitializer(const Graph& graph, const Node& gemm, int64_t hidde
 
 struct MatchUnidirMaskResult {
   const Node* div_node = nullptr;       // the root node (Div) of the subgraph
-  bool is_unidirectional = false;               // whether the mask is unidirectional.
+  bool is_unidirectional = false;       // whether the mask is unidirectional.
+  float mask_filter_value = -10000.0f;  // the value to filter out the mask.
   std::vector<NodeIndex> node_indices;  // id of all nodes in the subgraph for removing later.
 };
 
@@ -278,8 +281,8 @@ bool ValidateUnidirMask(std::vector<T> mask_data, int64_t w, bool& is_undirectio
     is_undirectional = true;
 
     const T* p = mask_data.data();
-    for (int i = 0; i < w; i++) {
-      for (int j = 0; j < w; j++) {
+    for (int64_t i = 0; i < w; i++) {
+      for (int64_t j = 0; j < w; j++) {
         if (*p != static_cast<T>(1)) {
           is_one = false;
         }
@@ -344,7 +347,7 @@ bool ValidateUnidirMask(const Graph& graph, const NodeArg& mask, bool& is_unidir
       return false;
     }
   } else if (tensor_proto->data_type() == ONNX_NAMESPACE::TensorProto_DataType_FLOAT) {
-    std::vector<float_t> float_data = ONNX_NAMESPACE::ParseData<float_t>(tensor_proto);
+    std::vector<float> float_data = ONNX_NAMESPACE::ParseData<float>(tensor_proto);
     if (!ValidateUnidirMask(float_data, shape->dim(2).dim_value(), is_unidirectional)) {
       DEBUG_LOG("Mask is neither unidirectional nor all ones");
       return false;
@@ -375,7 +378,7 @@ bool ValidateUnidirMask(const Graph& graph, const NodeArg& mask, bool& is_unidir
       |                (*, -2, -1, 0)   (axes=0)      |                                              Cast(9)
       +----> Shape --> Slice ---------> Squeeze-------+                                                |
       |      :shape2   :slice2         :squeeze2                                                       v condition
-      +----------------------------------------------------------------------------------------->Where( ,*,-10000)--->[Add]
+      +----------------------------------------------------------------------------------------->Where( ,*,-10000 or value of mask_filter_value)--->[Add]
 
  When use_shared_node is true, shape1 and shape2 is one node, and also unsqueeze2 and unsqueeze3 is same.
 */
@@ -394,8 +397,7 @@ bool MatchUnidirMaskSubgraph(const Graph& graph, const Node& add_node, MatchUnid
   const Node& where_node = edges[0]->GetNode();
   const Node& div_node = edges[1]->GetNode();
 
-  constexpr float expected_value = -10000.0f;
-  if (!optimizer_utils::IsInitializerWithExpectedValue(graph, *(where_node.InputDefs()[2]), expected_value, true)) {
+  if (!optimizer_utils::GetScalarInitializerValue<float>(graph, *(where_node.InputDefs()[2]), result.mask_filter_value, true)) {
     return false;
   }
 
@@ -550,6 +552,7 @@ bool MatchUnidirMaskSubgraph(const Graph& graph, const Node& add_node, MatchUnid
 struct AttentionMaskNodes {
   const Node* softmax;
   bool has_input_mask;  // When it is false, the following nodes will be NULL.
+  float mask_filter_value = -10000.0f;
 
   const Node* add;
   const Node* mul;
@@ -566,6 +569,7 @@ struct AttentionMaskNodesDistilBert {
   const Node* reshape;
   const Node* equal;
   const Node* shape;
+  float mask_filter_value = -10000.0f;
 };
 
 void SetMaskNodesToRemove(const Graph& graph, AttentionMaskNodes& mask_nodes, std::vector<NodeIndex>& nodes_to_remove) {
@@ -598,10 +602,10 @@ void SetMaskNodesToRemove(const Graph&, AttentionMaskNodesDistilBert& mask_nodes
 }
 
 /**  Match Input Mask subgraph:
-                                                                                                       {UnidirMask Subgraph}
-                                                                                                                   |
-                                                                  (optional)                                       v
-[Attention_mask] --> Unsqueeze (axes=1) --> Unsqueeze (axes=2) --> Cast ---->Sub(1,*) --> Mul(*, -10000.0) --> Add( ,*)--->SoftMax -->[MatMul]
+                                                                                                       {                            UnidirMask Subgraph}
+                                                                                                                                               |
+                                                                  (optional)                                                                   v
+[Attention_mask] --> Unsqueeze (axes=1) --> Unsqueeze (axes=2) --> Cast ---->Sub(1,*) --> Mul(*, -10000.0 or value of mask_filter_value) --> Add( ,*)--->SoftMax -->[MatMul]
 
 When is_input_mask_optional is true, this function also matches the following subgraph:
     {UnidirMask Subgraph [Where]} --> Softmax --> [MatMul]
@@ -694,7 +698,7 @@ bool MatchInputMaskSubgraph(const Graph& graph, const Node& qkv_matmul, Attentio
     return false;
   }
 
-  std::vector<int64_t> axes;
+  InlinedVector<int64_t> axes;
   if (!(graph_utils::GetRepeatedNodeAttributeValues(mask_unsqueeze_1, "axes", axes) && axes.size() == 1 && axes[0] == 1)) {
     DEBUG_LOG("mask_unsqueeze_1 axes not matched. Expect: 1");
     return false;
@@ -710,7 +714,7 @@ bool MatchInputMaskSubgraph(const Graph& graph, const Node& qkv_matmul, Attentio
     return false;
   }
 
-  if (!optimizer_utils::IsInitializerWithExpectedValue(graph, *(mask_mul.InputDefs()[1]), float(-10000), false)) {
+  if (!optimizer_utils::GetScalarInitializerValue(graph, *(mask_mul.InputDefs()[1]), result.mask_filter_value, false)) {
     DEBUG_LOG("mask_mul const input not matched");
     return false;
   }
@@ -763,13 +767,14 @@ bool MatchInputMaskSubgraph(const Graph& graph, const Node& layer_norm, const No
     return false;
   }
 
-  //check where has X=-Infinity
-  if (!optimizer_utils::IsInitializerWithExpectedValue(graph, *(where.InputDefs()[1]), -INFINITY, true)) {
+  // check where has X=-Infinity
+  if (!optimizer_utils::IsInitializerWithExpectedValue(graph, *(where.InputDefs()[1]),
+                                                       -std::numeric_limits<float>::infinity(), true)) {
     DEBUG_LOG("where const not matched.");
     return false;
   }
 
-  //expand has another input Shape <-- qk_MatMul
+  // expand has another input Shape <-- qk_MatMul
   std::vector<graph_utils::EdgeEndToMatch> shape_path{
       {0, 1, "Shape", {1, 13}, kOnnxDomain},
       {0, 0, "MatMul", {1, 9, 13}, kOnnxDomain}};
@@ -787,13 +792,13 @@ bool MatchInputMaskSubgraph(const Graph& graph, const Node& layer_norm, const No
     return false;
   }
 
-  //equal has input B=0
+  // equal has input B=0
   if (!optimizer_utils::IsInitializerWithExpectedValue(graph, *(equal.InputDefs()[1]), 0.0f, true)) {
     DEBUG_LOG("equal const not matched.");
     return false;
   }
 
-  //reshape node's shape input
+  // reshape node's shape input
   std::vector<graph_utils::EdgeEndToMatch> reshape_shape_path_1{
       {0, 1, "Concat", {4, 11, 13}, kOnnxDomain},
       {0, 0, "Unsqueeze", {1, 11, 13}, kOnnxDomain},
@@ -823,7 +828,7 @@ bool MatchInputMaskSubgraph(const Graph& graph, const Node& layer_norm, const No
   }
   const Node& gather_2 = edges[1]->GetNode();
   const Node& shape_2 = edges[2]->GetNode();
-  //check gather has the right indices
+  // check gather has the right indices
   if (!optimizer_utils::IsInitializerWithExpectedValue(graph, *(gather_1.InputDefs()[1]), static_cast<int64_t>(0), true) ||
       !optimizer_utils::IsInitializerWithExpectedValue(graph, *(gather_2.InputDefs()[1]), static_cast<int64_t>(1), true)) {
     DEBUG_LOG("gather indices not matched.");
@@ -848,11 +853,11 @@ bool MatchInputMaskSubgraph(const Graph& graph, const Node& layer_norm, const No
     return false;
   }
 
-  //check concat input shape information
+  // check concat input shape information
   if (concat.InputDefs().size() != 4) {
     return false;
   }
-  std::vector<int64_t> shape_value;
+  InlinedVector<int64_t> shape_value;
   if (!optimizer_utils::AppendTensorFromInitializer(graph, *(concat.InputDefs()[1]), shape_value, true) ||
       shape_value.size() != 1 ||
       shape_value[0] != 1) {
@@ -905,7 +910,7 @@ bool MatchPastSubgraph(Graph& graph, const Node& k_concat, const Node& v_concat,
     return false;
   }
   size_t i = 0;
-  const Node* past_k_transpose = transpose_optimized_pattern ? nullptr : & edges[i++]->GetNode();
+  const Node* past_k_transpose = transpose_optimized_pattern ? nullptr : &edges[i++]->GetNode();
   const Node& past_k_gather = edges[i++]->GetNode();
 
   std::vector<graph_utils::EdgeEndToMatch> present_k_path{
@@ -945,21 +950,19 @@ bool MatchPastSubgraph(Graph& graph, const Node& k_concat, const Node& v_concat,
   }
 
   if (!transpose_optimized_pattern) {
-    std::vector<int64_t> perm;
-    if (!(graph_utils::GetRepeatedNodeAttributeValues(*past_k_transpose, "perm", perm)
-        && perm.size() == 4 && perm[0] == 0 && perm[1] == 1 && perm[2] == 3 && perm[3] == 2)) {
+    InlinedVector<int64_t> perm;
+    if (!(graph_utils::GetRepeatedNodeAttributeValues(*past_k_transpose, "perm", perm) && perm.size() == 4 && perm[0] == 0 && perm[1] == 1 && perm[2] == 3 && perm[3] == 2)) {
       DEBUG_LOG("past_k_transpose perm attribute not matched");
       return false;
     }
 
-    if (!(graph_utils::GetRepeatedNodeAttributeValues(*present_k_transpose, "perm", perm)
-        && perm.size() == 4 && perm[0] == 0 && perm[1] == 1 && perm[2] == 3 && perm[3] == 2)) {
+    if (!(graph_utils::GetRepeatedNodeAttributeValues(*present_k_transpose, "perm", perm) && perm.size() == 4 && perm[0] == 0 && perm[1] == 1 && perm[2] == 3 && perm[3] == 2)) {
       DEBUG_LOG("present_k_transpose perm attribute not matched");
       return false;
     }
   }
 
-  std::vector<int64_t> axes;
+  InlinedVector<int64_t> axes;
   if (!(graph_utils::GetRepeatedNodeAttributeValues(present_k_unsqueeze, "axes", axes) && axes.size() == 1 && axes[0] == 0)) {
     DEBUG_LOG("present_k_unsqueeze axes value not expected");
     return false;
@@ -1039,7 +1042,7 @@ bool CheckDistilBertReshapeShape(const Graph& graph, const Node& reshape, int64_
   }
   record_node_idx = edges[1]->GetNode().Index();
 
-  std::vector<int64_t> shape;
+  InlinedVector<int64_t> shape;
   const NodeArg& concat_input_arg_1 = *((*p_concat).InputDefs()[1]);
   if (!optimizer_utils::AppendTensorFromInitializer(graph, concat_input_arg_1, shape) ||
       shape.size() != 1 ||
@@ -1083,7 +1086,7 @@ bool CheckNodesInPathV(const Graph& graph, const Node& reshape, const Node& tran
     DEBUG_LOG("Output edge count not expected for nodes in path v");
     return false;
   }
-  std::vector<int64_t> perm;
+  InlinedVector<int64_t> perm;
   if (!(graph_utils::GetRepeatedNodeAttributeValues(transpose, "perm", perm) && perm.size() == 4 && perm[0] == 0 && perm[1] == 2 && perm[2] == 1 && perm[3] == 3)) {
     DEBUG_LOG("Failed in match Transpose attribute perm. Expected: 0, 2, 1, 3");
     return false;
@@ -1100,11 +1103,11 @@ bool CheckNodesInPathV(const Graph& graph, const Node& reshape, const Node& tran
   }
 
   // Check reshape for q, k or v has shape input (0, 0, N, -1) or (0, 0, N, H)
-  std::vector<int64_t> v_reshape_shape;
+  InlinedVector<int64_t> v_reshape_shape;
   if (!optimizer_utils::AppendTensorFromInitializer(graph, *(v_reshape.InputDefs()[1]), v_reshape_shape) ||
       v_reshape_shape.size() != 4 ||
       v_reshape_shape[0] != 0 ||
-      (v_reshape_shape[1] != 0 && v_reshape_shape[1] != -1) ||  //v_reshape_shape[1] != -1 added for supporting distilbert
+      (v_reshape_shape[1] != 0 && v_reshape_shape[1] != -1) ||  // v_reshape_shape[1] != -1 added for supporting distilbert
       v_reshape_shape[2] <= 0 ||
       v_reshape_shape[2] > hidden_size ||
       (head_size < 0 && v_reshape_shape[3] != -1) ||
@@ -1117,9 +1120,9 @@ bool CheckNodesInPathV(const Graph& graph, const Node& reshape, const Node& tran
   head_size = v_reshape_shape[3];
 
   // Check reshape for attention output has shape input (0, 0, -1) or (0, 0, N*H)
-  // In DistilBert, the reshape after qkv paths can not be fused during reshape fusion, so we do not have the correspondig
-  // initializer. We need to get the shape information from the input of concat.
-  std::vector<int64_t> reshape_shape;
+  // In DistilBert, the reshape after qkv paths can not be fused during reshape fusion, so we do not have the
+  // corresponding initializer. We need to get the shape information from the input of concat.
+  InlinedVector<int64_t> reshape_shape;
   if (!optimizer_utils::AppendTensorFromInitializer(graph, *(reshape.InputDefs()[1]), reshape_shape)) {
     if (CheckDistilBertReshapeShape(graph, reshape, hidden_size, record_node_idx, logger)) {
       DEBUG_LOG("Pass CheckNodesInPathV");
@@ -1151,11 +1154,11 @@ bool CheckNodesInPathV(const Graph& graph, const Node& reshape, const Node& tran
 
 bool CheckNodesInPathQ(const Graph& graph, const Node& qk_div, const Node& q_reshape, const Node& q_transpose, int64_t num_heads, int64_t head_size, const logging::Logger& logger) {
   DEBUG_LOG("Start CheckNodesInPathQ");
-  std::vector<int64_t> q_reshape_shape;
+  InlinedVector<int64_t> q_reshape_shape;
   if (!optimizer_utils::AppendTensorFromInitializer(graph, *(q_reshape.InputDefs()[1]), q_reshape_shape) ||
       q_reshape_shape.size() != 4 ||
       q_reshape_shape[0] != 0 ||
-      (q_reshape_shape[1] != 0 && q_reshape_shape[1] != -1) ||  //q_reshape_shape[1] != -1 added for supporting distilbert
+      (q_reshape_shape[1] != 0 && q_reshape_shape[1] != -1) ||  // q_reshape_shape[1] != -1 added for supporting distilbert
       q_reshape_shape[2] != num_heads ||
       q_reshape_shape[3] != head_size) {
     DEBUG_LOG("q_reshape const not matched");
@@ -1168,7 +1171,7 @@ bool CheckNodesInPathQ(const Graph& graph, const Node& qk_div, const Node& q_res
     return false;
   }
 
-  std::vector<int64_t> perm;
+  InlinedVector<int64_t> perm;
   if (!(graph_utils::GetRepeatedNodeAttributeValues(q_transpose, "perm", perm) && perm.size() == 4 && perm[0] == 0 && perm[1] == 2 && perm[2] == 1 && perm[3] == 3)) {
     DEBUG_LOG("q_transpose perm attribute not matched");
     return false;
@@ -1180,7 +1183,7 @@ bool CheckNodesInPathQ(const Graph& graph, const Node& qk_div, const Node& q_res
 bool CheckNodesInPathK(const Graph& graph, const Node& k_reshape, const Node& k_transpose, int64_t num_heads,
                        int64_t head_size, bool tranpose_optimized_pattern, const logging::Logger& logger) {
   DEBUG_LOG("Start CheckNodesInPathK");
-  std::vector<int64_t> perm;
+  InlinedVector<int64_t> perm;
 
   if (!graph_utils::GetRepeatedNodeAttributeValues(k_transpose, "perm", perm)) {
     DEBUG_LOG("k_transpose has not perm attribute");
@@ -1199,11 +1202,11 @@ bool CheckNodesInPathK(const Graph& graph, const Node& k_reshape, const Node& k_
     return false;
   }
 
-  std::vector<int64_t> k_reshape_shape;
+  InlinedVector<int64_t> k_reshape_shape;
   if (!optimizer_utils::AppendTensorFromInitializer(graph, *(k_reshape.InputDefs()[1]), k_reshape_shape) ||
       k_reshape_shape.size() != 4 ||
       k_reshape_shape[0] != 0 ||
-      (k_reshape_shape[1] != 0 && k_reshape_shape[1] != -1) ||  //k_reshape_shape[1] != -1 added for supporting distilbert
+      (k_reshape_shape[1] != 0 && k_reshape_shape[1] != -1) ||  // k_reshape_shape[1] != -1 added for supporting distilbert
       k_reshape_shape[2] != num_heads ||
       k_reshape_shape[3] != head_size) {
     DEBUG_LOG("k_reshape const not matched");
@@ -1227,8 +1230,8 @@ NodeArg& CastMaskToInt32(Graph& graph, NodeArg* mask_input, ProviderType provide
   }
 
   NodeArg& cast32 = graph.GetOrCreateNodeArg(graph.GenerateNodeArgName("Mask_Int32"), &mask_int32);
-  const std::vector<NodeArg*> input_defs{mask_input};
-  const std::vector<NodeArg*> output_defs{&cast32};
+  const std::array input_defs{mask_input};
+  const std::array output_defs{&cast32};
   Node& node = graph.AddNode(graph.GenerateNodeName("MaskCast"),
                              "Cast",
                              "Cast mask from int64 to int32",
@@ -1238,11 +1241,7 @@ NodeArg& CastMaskToInt32(Graph& graph, NodeArg* mask_input, ProviderType provide
                              kOnnxDomain);
 
   // Add attribute: "to" = 6
-  ONNX_NAMESPACE::AttributeProto to;
-  to.set_name("to");
-  to.set_type(ONNX_NAMESPACE::AttributeProto_AttributeType::AttributeProto_AttributeType_INT);
-  to.set_i(static_cast<int64_t>(ONNX_NAMESPACE::TensorProto_DataType_INT32));
-  node.AddAttribute("to", to);
+  node.AddAttribute("to", static_cast<int64_t>(ONNX_NAMESPACE::TensorProto_DataType_INT32));
 
   node.SetExecutionProviderType(provider_type);
   return cast32;
@@ -1453,7 +1452,6 @@ bool FuseGptAttention(Node& layer_norm, Graph& graph, int64_t hidden_size, std::
   bool transpose_optimized_pattern = false;
   const Node* opt_k_transpose = nullptr;
   if (has_past) {
-
     k_concat = graph_utils::GetInputNode(qk_matmul, 1);
     if (k_concat == nullptr) {
       return false;
@@ -1463,10 +1461,9 @@ bool FuseGptAttention(Node& layer_norm, Graph& graph, int64_t hidden_size, std::
       transpose_optimized_pattern = true;
       DEBUG_LOG("Using transpose optimized pattern");
       opt_k_transpose = k_concat;
-      std::vector<int64_t> perm;
+      InlinedVector<int64_t> perm;
 
-      if (!(graph_utils::GetRepeatedNodeAttributeValues(*opt_k_transpose, "perm", perm) 
-          && perm.size() == 4 && perm[0] == 0 && perm[1] == 1 && perm[2] == 3 && perm[3] == 2)) {
+      if (!(graph_utils::GetRepeatedNodeAttributeValues(*opt_k_transpose, "perm", perm) && perm.size() == 4 && perm[0] == 0 && perm[1] == 1 && perm[2] == 3 && perm[3] == 2)) {
         DEBUG_LOG("opt_k_transpose perm attribute not matched");
         return false;
       }
@@ -1545,6 +1542,10 @@ bool FuseGptAttention(Node& layer_norm, Graph& graph, int64_t hidden_size, std::
       kMSDomain);
   attention_node.AddAttribute("num_heads", num_heads);
   attention_node.AddAttribute("unidirectional", static_cast<int64_t>(unidir_mask_result.is_unidirectional));
+  if (mask_nodes.mask_filter_value != -10000.0f || unidir_mask_result.mask_filter_value != -10000.0f) {
+    float mask_filter_value = mask_nodes.mask_filter_value != -10000.0f ? mask_nodes.mask_filter_value : unidir_mask_result.mask_filter_value;
+    attention_node.AddAttribute("mask_filter_value", mask_filter_value);
+  }
 
   // Assign provider to this new node.
   attention_node.SetExecutionProviderType(layer_norm.GetExecutionProviderType());

@@ -4,6 +4,7 @@
 #include "common_subexpression_elimination.h"
 #include "core/optimizer/utils.h"
 #include "core/graph/graph_utils.h"
+#include "core/framework/tensorprotoutils.h"
 
 #include <memory>
 #include <type_traits>
@@ -89,7 +90,7 @@ class EquivalenceClass {
   bool operator==(const EquivalenceClass& other) const;
 
   friend struct ::std::hash<EquivalenceClass>;
-  friend std::vector<std::vector<const EquivalenceClass*>> Normalize(const Node& node, const std::vector<const EquivalenceClass*>& inputs);
+  friend InlinedVector<InlinedVector<const EquivalenceClass*>> Normalize(const Node& node, gsl::span<const EquivalenceClass* const> inputs);
 
   explicit EquivalenceClass(const NodeArg* non_op_value)
       : attributes_(nullptr),
@@ -99,7 +100,7 @@ class EquivalenceClass {
         hash_(CalculateHash()) {
   }
 
-  EquivalenceClass(const Node& node, const std::vector<const EquivalenceClass*>& explicit_inputs,
+  EquivalenceClass(const Node& node, const gsl::span<const EquivalenceClass* const>& explicit_inputs,
                    OutputIndex output_index, int discriminator)
       : op_type_(node.OpType()),
         domain_(node.Domain()),
@@ -119,7 +120,7 @@ class EquivalenceClass {
   const std::string domain_;
 
   // Explicit inputs to the operation, sequence of inputs for each formal parameter.
-  const std::vector<std::vector<const EquivalenceClass*>> inputs_;
+  const InlinedVector<InlinedVector<const EquivalenceClass*>> inputs_;
 
   // Attributes of the operation.
   const NodeAttributes* attributes_;
@@ -141,10 +142,10 @@ class EquivalenceClass {
   const std::size_t hash_;
 };
 
-std::vector<std::vector<const EquivalenceClass*>> Normalize(const Node& node, const std::vector<const EquivalenceClass*>& inputs) {
+InlinedVector<InlinedVector<const EquivalenceClass*>> Normalize(const Node& node, gsl::span<const EquivalenceClass* const> inputs) {
   const auto& arg_count = node.InputArgCount();
   auto input_iter = inputs.begin();
-  std::vector<std::vector<const EquivalenceClass*>> result(arg_count.size());
+  InlinedVector<InlinedVector<const EquivalenceClass*>> result(arg_count.size());
 
   for (std::size_t arg_index = 0; arg_index < arg_count.size(); ++arg_index) {
     auto& arg = result[arg_index];
@@ -170,6 +171,32 @@ bool AreRangesEqual(const Range& lhs, const Range& rhs) {
          std::equal(lhs.begin(), lhs.end(), rhs.begin());
 }
 
+// Check if two tensor attributes are equal scalar tensors, mainly to support ConstantOfShape Op.
+// Currently support float, float16 and int64 data types, and requires the data are raw data in TensorProto.
+bool AreScalarTensorAttributeEqual(const ONNX_NAMESPACE::TensorProto& lhs_t, const ONNX_NAMESPACE::TensorProto& rhs_t) {
+  if (!(utils::HasDataType(lhs_t) && utils::HasDataType(rhs_t) && lhs_t.data_type() == rhs_t.data_type() &&
+        (lhs_t.data_type() == onnx::TensorProto_DataType_FLOAT ||
+         lhs_t.data_type() == onnx::TensorProto_DataType_FLOAT16 ||
+         lhs_t.data_type() == onnx::TensorProto_DataType_INT64) &&
+        lhs_t.dims_size() == 1 && rhs_t.dims_size() == 1 && lhs_t.dims()[0] == 1 && rhs_t.dims()[0] == 1 &&
+        utils::HasRawData(lhs_t) && utils::HasRawData(rhs_t))) {
+    return false;
+  }
+  const void* lhs_value = lhs_t.raw_data().data();
+  const void* rhs_value = rhs_t.raw_data().data();
+  switch (lhs_t.data_type()) {
+    case onnx::TensorProto_DataType_FLOAT:
+      return *reinterpret_cast<const float*>(lhs_value) == *reinterpret_cast<const float*>(rhs_value);
+    case onnx::TensorProto_DataType_FLOAT16:
+      return *reinterpret_cast<const MLFloat16*>(lhs_value) == *reinterpret_cast<const MLFloat16*>(rhs_value);
+    case onnx::TensorProto_DataType_INT64:
+      return *reinterpret_cast<const int64_t*>(lhs_value) == *reinterpret_cast<const int64_t*>(rhs_value);
+    default:
+      break;
+  }
+  return false;
+}
+
 bool AreEqual(const ONNX_NAMESPACE::AttributeProto& lhs, const ONNX_NAMESPACE::AttributeProto& rhs) {
   if (&lhs == &rhs) {
     return true;
@@ -193,6 +220,7 @@ bool AreEqual(const ONNX_NAMESPACE::AttributeProto& lhs, const ONNX_NAMESPACE::A
     case onnx::AttributeProto_AttributeType_STRINGS:
       return AreRangesEqual(lhs.strings(), rhs.strings());
     case onnx::AttributeProto_AttributeType_TENSOR:
+      return AreScalarTensorAttributeEqual(lhs.t(), rhs.t());
     case onnx::AttributeProto_AttributeType_GRAPH:
     case onnx::AttributeProto_AttributeType_SPARSE_TENSOR:
     case onnx::AttributeProto_AttributeType_TYPE_PROTO:
@@ -205,6 +233,31 @@ bool AreEqual(const ONNX_NAMESPACE::AttributeProto& lhs, const ONNX_NAMESPACE::A
   }
 
   return false;
+}
+
+// Support scalar float/int64/fp16 tensor attribute only for now, and requires data is raw data in TensorProto.
+std::size_t GetTensorAttributeHash(const ONNX_NAMESPACE::TensorProto& attr_t) {
+  std::size_t hash = 0;
+  if (utils::HasDataType(attr_t) && attr_t.dims_size() == 1 && attr_t.dims()[0] == 1 && utils::HasRawData(attr_t)) {
+    int data_type = attr_t.data_type();
+    switch (data_type) {
+      case onnx::TensorProto_DataType_FLOAT:
+        UpdateHash(data_type, hash);
+        UpdateHash(*reinterpret_cast<const float*>(attr_t.raw_data().data()), hash);
+        break;
+      case onnx::TensorProto_DataType_FLOAT16:
+        UpdateHash(data_type, hash);
+        UpdateHash(static_cast<float>(*reinterpret_cast<const MLFloat16*>(attr_t.raw_data().data())), hash);
+        break;
+      case onnx::TensorProto_DataType_INT64:
+        UpdateHash(data_type, hash);
+        UpdateHash(*reinterpret_cast<const int64_t*>(attr_t.raw_data().data()), hash);
+        break;
+      default:
+        break;
+    }
+  }
+  return hash;
 }
 
 std::size_t GetAttributeHash(const ONNX_NAMESPACE::AttributeProto& attr) {
@@ -233,6 +286,8 @@ std::size_t GetAttributeHash(const ONNX_NAMESPACE::AttributeProto& attr) {
       UpdateHashWithContainer(attr.strings(), hash);
       break;
     case onnx::AttributeProto_AttributeType_TENSOR:
+      UpdateHash(attr.t(), &GetTensorAttributeHash, hash);
+      break;
     case onnx::AttributeProto_AttributeType_GRAPH:
     case onnx::AttributeProto_AttributeType_SPARSE_TENSOR:
     case onnx::AttributeProto_AttributeType_TYPE_PROTO:
@@ -318,7 +373,14 @@ struct NodeArgPtrEquality {
 };
 
 bool IsNodeSupported(const Node& node) {
-  return !node.ContainsSubgraph() && optimizer_utils::IsOperationDeterministic(node.Domain(), node.OpType());
+  // skip control flow nodes, nodes that produce non-deterministic output, and DequantizeLinear (DQ) nodes.
+  // the reason for skipping DQ is that the QDQ handling looks for QDQ node groups (DQ -> fp32 node -> Q node)
+  // and does not allow for a DQ node to be used in multiple groups. coalescing multiple DQ nodes into one
+  // would result in it having multiple consumers for its output, and it being used in multiple QDQ node groups.
+  return !node.ContainsSubgraph() &&
+         optimizer_utils::IsOperationDeterministic(node.Domain(), node.OpType()) &&
+         !(node.Domain() == kOnnxDomain && node.OpType() == "DequantizeLinear") &&
+         !(node.Domain() == kMSDomain && node.OpType() == "DequantizeLinear");
 }
 }  // namespace
 
@@ -340,7 +402,7 @@ Status CommonSubexpressionElimination::ApplyImpl(Graph& graph, bool& modified, i
   const auto& node_topology_list = graph_viewer.GetNodesInTopologicalOrder();
 
   // Pool of equivalence classes; unique_ptr to guarantee stable address.
-  std::vector<std::unique_ptr<EquivalenceClass>> unique_equivalence_classes;
+  InlinedVector<std::unique_ptr<EquivalenceClass>> unique_equivalence_classes;
   unique_equivalence_classes.reserve(graph.NumberOfNodes());
 
   // Maps an equivalence class of values to a representative NodeArg that belongs to this class.
@@ -364,7 +426,7 @@ Status CommonSubexpressionElimination::ApplyImpl(Graph& graph, bool& modified, i
 
     ORT_RETURN_IF_ERROR(Recurse(*node, modified, graph_level, logger));
 
-    std::vector<const EquivalenceClass*> input_values;
+    InlinedVector<const EquivalenceClass*> input_values;
     input_values.reserve(node->InputDefs().size());
     for (const NodeArg* input_def : node->InputDefs()) {
       auto it = equivalence_classes.find(input_def);
@@ -403,7 +465,8 @@ Status CommonSubexpressionElimination::ApplyImpl(Graph& graph, bool& modified, i
     }
   }
 
-  std::unordered_set<const NodeArg*> graph_outputs;
+  InlinedHashSet<const NodeArg*> graph_outputs;
+  graph_outputs.reserve(graph_viewer.GetOutputs().size());
   graph_outputs.insert(graph_viewer.GetOutputs().begin(), graph_viewer.GetOutputs().end());
 
   for (NodeIndex node_index : node_topology_list) {
@@ -428,7 +491,8 @@ Status CommonSubexpressionElimination::ApplyImpl(Graph& graph, bool& modified, i
 
       if (graph_outputs.count(output_def) > 0) {
         // Currently, we don't support eliminating the graph's outputs.
-        LOGS(logger, VERBOSE) << "Not eliminating output " << output_def->Name() << " of node " << node->Name() << "[" << node->OpType() << "] because it's the graph's output.";
+        LOGS(logger, VERBOSE) << "Not eliminating output " << output_def->Name() << " of node " << node->Name()
+                              << "[" << node->OpType() << "] because it's the graph's output.";
         continue;
       }
 

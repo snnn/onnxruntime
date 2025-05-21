@@ -39,16 +39,29 @@ ONNX_OPERATOR_VERSIONED_KERNEL_EX(Loop,
                                   Loop);
 
 // opset-13 supports sequence type for loop carried dependencies
+ONNX_OPERATOR_VERSIONED_KERNEL_EX(Loop,
+                                  kOnnxDomain,
+                                  13, 18,
+                                  kCudaExecutionProvider,
+                                  (*KernelDefBuilder::Create())
+                                      .InputMemoryType(OrtMemTypeCPUInput, 0)  // 'M' needs to be on CPU
+                                      .InputMemoryType(OrtMemTypeCPUInput, 1)  // 'cond' needs to be on CPU
+                                      .TypeConstraint("I", DataTypeImpl::GetTensorType<int64_t>())
+                                      .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
+                                      .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorTypes()),
+                                  Loop);
+
+// opset-19 supports float 8 types.
 ONNX_OPERATOR_KERNEL_EX(Loop,
                         kOnnxDomain,
-                        13,
+                        19,
                         kCudaExecutionProvider,
                         (*KernelDefBuilder::Create())
                             .InputMemoryType(OrtMemTypeCPUInput, 0)  // 'M' needs to be on CPU
                             .InputMemoryType(OrtMemTypeCPUInput, 1)  // 'cond' needs to be on CPU
                             .TypeConstraint("I", DataTypeImpl::GetTensorType<int64_t>())
                             .TypeConstraint("B", DataTypeImpl::GetTensorType<bool>())
-                            .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorTypes()),
+                            .TypeConstraint("V", DataTypeImpl::AllTensorAndSequenceTensorTypesIRv9()),
                         Loop);
 
 static Status ConcatenateGpuOutput(void* stream, std::vector<OrtValue>& per_iteration_output,
@@ -71,10 +84,10 @@ static Status ConcatenateGpuOutput(void* stream, std::vector<OrtValue>& per_iter
     CUDA_RETURN_IF_ERROR(cudaMemcpyAsync(cur_output, iteration_data.DataRaw(), bytes_per_iteration,
                                          cudaMemcpyDeviceToDevice, static_cast<cudaStream_t>(stream)));
 
-    cur_output = static_cast<void*>((static_cast<gsl::byte*>(cur_output) + bytes_per_iteration));
+    cur_output = static_cast<void*>((static_cast<std::byte*>(cur_output) + bytes_per_iteration));
   }
 
-  ORT_ENFORCE(static_cast<gsl::byte*>(cur_output) - static_cast<gsl::byte*>(output) == output_size_in_bytes,
+  ORT_ENFORCE(static_cast<std::byte*>(cur_output) - static_cast<std::byte*>(output) == output_size_in_bytes,
               "Concatenation did not fill output buffer as expected.");
 
   return Status::OK();
@@ -97,7 +110,6 @@ Loop::Loop(const OpKernelInfo& info) : onnxruntime::Loop(info) {
               "Using Loop operator on CUDA while using a dedicated stream for copying "
               "(a stream that is different than the compute stream) is currently not supported");
   SetConcatOutputFunc(ConcatenateGpuOutput);
-  SetComputeStream(static_cast<void*>(info.GetExecutionProvider()->GetComputeStream()));
 }
 
 Status Loop::Compute(OpKernelContext* ctx) const {

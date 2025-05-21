@@ -14,15 +14,17 @@ limitations under the License.
 ==============================================================================*/
 
 #include <memory>
+#include <optional>
 
 #include "core/platform/threadpool.h"
 #include "core/common/common.h"
 #include "core/common/cpuid_info.h"
 #include "core/common/eigen_common_wrapper.h"
 #include "core/platform/EigenNonBlockingThreadPool.h"
-#include "core/platform/ort_mutex.h"
+#include <mutex>
 #if !defined(ORT_MINIMAL_BUILD)
 #ifdef _WIN32
+#include <Windows.h>
 #include "processthreadsapi.h"
 #include <codecvt>
 #include <locale>
@@ -135,6 +137,8 @@ void ThreadPoolProfiler::MainThreadStat::LogCore() {
 #endif
 #elif defined(__wasm__)
   core_ = emscripten_num_logical_cores();
+#elif defined(_AIX)
+  core_ = mycpu();
 #else
   core_ = sched_getcpu();
 #endif
@@ -217,6 +221,8 @@ void ThreadPoolProfiler::LogRun(int thread_idx) {
 #endif
 #elif defined(__wasm__)
       child_thread_stats_[thread_idx].core_ = emscripten_num_logical_cores();
+#elif defined(_AIX)
+      child_thread_stats_[thread_idx].core_ = mycpu();
 #else
       child_thread_stats_[thread_idx].core_ = sched_getcpu();
 #endif
@@ -261,7 +267,7 @@ struct alignas(CACHE_LINE_BYTES) LoopCounterShard {
 };
 
 static_assert(sizeof(LoopCounterShard) == CACHE_LINE_BYTES, "Expected loop counter shards to match cache-line size");
- 
+
 class alignas(CACHE_LINE_BYTES) LoopCounter {
  public:
   LoopCounter(uint64_t num_iterations,
@@ -368,14 +374,22 @@ ThreadPool::ThreadPool(Env* env,
                        const ThreadOptions& thread_options,
                        const NAME_CHAR_TYPE* name,
                        int degree_of_parallelism,
-                       bool low_latency_hint)
-    : thread_options_(thread_options) {
+                       bool low_latency_hint,
+                       bool force_hybrid)
+    : thread_options_(thread_options), force_hybrid_(force_hybrid) {
   // In the current implementation, a thread pool with degree_of_parallelism==1 uses
   // the caller as one of the threads for executing work.  Hence we only create
   // additional thread(s) for degree_of_parallelism>=2.
   assert(degree_of_parallelism >= 1);
   if (degree_of_parallelism >= 2) {
     int threads_to_create = degree_of_parallelism - 1;
+
+    if (!thread_options_.affinities.empty()) {
+      // Remove first affinity element as designated for the caller thread
+      thread_options_.affinities.erase(thread_options_.affinities.begin());
+      assert(thread_options_.affinities.size() >= size_t(threads_to_create));
+    }
+
     extended_eigen_threadpool_ =
         std::make_unique<ThreadPoolTempl<Env> >(name,
                                                 threads_to_create,
@@ -444,7 +458,9 @@ void ThreadPool::ParallelForFixedBlockSizeScheduling(const std::ptrdiff_t total,
         }
       }
     };
-    RunInParallel(run_work, d_of_p, base_block_size);
+    // Distribute task among all threads in the pool, reduce number of work items if
+    // num_of_blocks is smaller than number of threads.
+    RunInParallel(run_work, std::min(NumThreads() + 1, num_of_blocks), base_block_size);
   }
 }
 
@@ -478,31 +494,32 @@ std::string ThreadPool::StopProfiling() {
   }
 }
 
-thread_local ThreadPool::ParallelSection* ThreadPool::ParallelSection::current_parallel_section{nullptr};
+namespace {
+thread_local std::optional<ThreadPoolParallelSection> current_parallel_section;
+}
 
 ThreadPool::ParallelSection::ParallelSection(ThreadPool* tp) {
-  ORT_ENFORCE(!current_parallel_section, "Nested parallelism not supported");
-  ORT_ENFORCE(!ps_.get());
+  ORT_ENFORCE(!current_parallel_section.has_value(), "Nested parallelism not supported");
+  ORT_ENFORCE(!ps_);
   tp_ = tp;
   if (tp && tp->underlying_threadpool_) {
-    ps_ = tp->underlying_threadpool_->AllocateParallelSection();
-    tp_->underlying_threadpool_->StartParallelSection(*ps_.get());
-    current_parallel_section = this;
+    current_parallel_section.emplace();
+    ps_ = &*current_parallel_section;
+    tp_->underlying_threadpool_->StartParallelSection(*ps_);
   }
 }
 
 ThreadPool::ParallelSection::~ParallelSection() {
   if (current_parallel_section) {
-    tp_->underlying_threadpool_->EndParallelSection(*ps_.get());
-    ps_.reset();
-    current_parallel_section = nullptr;
+    tp_->underlying_threadpool_->EndParallelSection(*ps_);
+    current_parallel_section.reset();
   }
 }
 
 void ThreadPool::RunInParallel(std::function<void(unsigned idx)> fn, unsigned n, std::ptrdiff_t block_size) {
   if (underlying_threadpool_) {
-    if (ThreadPool::ParallelSection::current_parallel_section) {
-      underlying_threadpool_->RunInParallelSection(*(ThreadPool::ParallelSection::current_parallel_section->ps_.get()),
+    if (current_parallel_section.has_value()) {
+      underlying_threadpool_->RunInParallelSection(*current_parallel_section,
                                                    std::move(fn),
                                                    n, block_size);
     } else {
@@ -546,7 +563,7 @@ static ptrdiff_t CalculateParallelForBlock(const ptrdiff_t n, const Eigen::Tenso
   constexpr ptrdiff_t max_oversharding_factor = 4;
   ptrdiff_t block_size = Eigen::numext::mini(
       n,
-      Eigen::numext::maxi<ptrdiff_t>(Eigen::divup<ptrdiff_t>(n, max_oversharding_factor * num_threads), static_cast<ptrdiff_t>(block_size_f)));
+      Eigen::numext::maxi<ptrdiff_t>(Eigen::numext::div_ceil<ptrdiff_t>(n, max_oversharding_factor * num_threads), static_cast<ptrdiff_t>(block_size_f)));
   const ptrdiff_t max_block_size = Eigen::numext::mini(n, 2 * block_size);
 
   if (block_align) {
@@ -555,19 +572,19 @@ static ptrdiff_t CalculateParallelForBlock(const ptrdiff_t n, const Eigen::Tenso
     block_size = Eigen::numext::mini(n, new_block_size);
   }
 
-  ptrdiff_t block_count = Eigen::divup(n, block_size);
+  ptrdiff_t block_count = Eigen::numext::div_ceil(n, block_size);
 
   // Calculate parallel efficiency as fraction of total CPU time used for
   // computations:
   double max_efficiency =
-      static_cast<double>(block_count) / (Eigen::divup<ptrdiff_t>(block_count, num_threads) * num_threads);
+      static_cast<double>(block_count) / (Eigen::numext::div_ceil<ptrdiff_t>(block_count, num_threads) * num_threads);
 
   // Now try to increase block size up to max_block_size as long as it
   // doesn't decrease parallel efficiency.
   for (ptrdiff_t prev_block_count = block_count; max_efficiency < 1.0 && prev_block_count > 1;) {
     // This is the next block size that divides size into a smaller number
     // of blocks than the current block_size.
-    ptrdiff_t coarser_block_size = Eigen::divup(n, prev_block_count - 1);
+    ptrdiff_t coarser_block_size = Eigen::numext::div_ceil(n, prev_block_count - 1);
     if (block_align) {
       ptrdiff_t new_block_size = block_align(coarser_block_size);
       assert(new_block_size >= coarser_block_size);
@@ -577,11 +594,11 @@ static ptrdiff_t CalculateParallelForBlock(const ptrdiff_t n, const Eigen::Tenso
       break;  // Reached max block size. Stop.
     }
     // Recalculate parallel efficiency.
-    const ptrdiff_t coarser_block_count = Eigen::divup(n, coarser_block_size);
+    const ptrdiff_t coarser_block_count = Eigen::numext::div_ceil(n, coarser_block_size);
     assert(coarser_block_count < prev_block_count);
     prev_block_count = coarser_block_count;
     const double coarser_efficiency =
-        static_cast<double>(coarser_block_count) / (Eigen::divup<ptrdiff_t>(coarser_block_count, num_threads) * num_threads);
+        static_cast<double>(coarser_block_count) / (Eigen::numext::div_ceil<ptrdiff_t>(coarser_block_count, num_threads) * num_threads);
     if (coarser_efficiency + 0.01 >= max_efficiency) {
       // Taking it.
       block_size = coarser_block_size;
@@ -620,10 +637,10 @@ bool ThreadPool::ShouldParallelize(const concurrency::ThreadPool* tp) {
 }
 
 int ThreadPool::DegreeOfParallelism(const concurrency::ThreadPool* tp) {
-  // When not using OpenMP, we parallelise over the N threads created by the pool
+  // When not using OpenMP, we parallelize over the N threads created by the pool
   // tp, plus 1 for the thread entering a loop.
   if (tp) {
-    if (CPUIDInfo::GetCPUIDInfo().IsHybrid()) {
+    if (tp->force_hybrid_ || CPUIDInfo::GetCPUIDInfo().IsHybrid()) {
       return ((tp->NumThreads() + 1)) * TaskGranularityFactor;
     } else {
       return ((tp->NumThreads() + 1));
@@ -644,6 +661,18 @@ std::string ThreadPool::StopProfiling(concurrency::ThreadPool* tp) {
     return tp->StopProfiling();
   } else {
     return {};
+  }
+}
+
+void ThreadPool::EnableSpinning() {
+  if (extended_eigen_threadpool_) {
+    extended_eigen_threadpool_->EnableSpinning();
+  }
+}
+
+void ThreadPool::DisableSpinning() {
+  if (extended_eigen_threadpool_) {
+    extended_eigen_threadpool_->DisableSpinning();
   }
 }
 

@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 #include "core/framework/config_options.h"
+#include "core/common/common.h"
+#include "core/common/logging/logging.h"
 
 namespace onnxruntime {
 
@@ -22,19 +24,21 @@ bool ConfigOptions::TryGetConfigEntry(const std::string& config_key, std::string
   return found;
 }
 
-const std::string ConfigOptions::GetConfigOrDefault(const std::string& config_key,
-                                                    const std::string& default_value) const noexcept {
+std::string ConfigOptions::GetConfigOrDefault(const std::string& config_key,
+                                              const std::string& default_value) const noexcept {
   return GetConfigEntry(config_key).value_or(default_value);
 }
 
 Status ConfigOptions::AddConfigEntry(const char* config_key, const char* config_value) noexcept {
-  std::string key(config_key);
-  if (key.empty() || key.length() > 128)
-    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, "Config key is empty or longer than maximum length 128");
+  std::string key = config_key;
+  if (key.empty() || key.length() > kMaxKeyLength)
+    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, "Config key is empty or longer than maximum length ",
+                           kMaxKeyLength);
 
-  std::string val(config_value);
-  if (val.length() > 1024)
-    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, "Config value is longer than maximum length 1024");
+  std::string val = config_value;
+  if (val.length() > kMaxValueLength)
+    return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                           "Config value is longer than maximum length: ", kMaxValueLength);
 
   auto iter = configurations.find(config_key);
   if (iter != configurations.cend()) {
@@ -46,6 +50,17 @@ Status ConfigOptions::AddConfigEntry(const char* config_key, const char* config_
   }
 
   return Status::OK();
+}
+
+const std::unordered_map<std::string, std::string>& ConfigOptions::GetConfigOptionsMap() const noexcept {
+  return configurations;
+}
+
+std::ostream& operator<<(std::ostream& os, const ConfigOptions& config_options) {
+  for (const auto& [key, value] : config_options.configurations) {
+    os << "  " << key << ": " << value;
+  }
+  return os;
 }
 
 }  // namespace onnxruntime

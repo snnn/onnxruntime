@@ -19,7 +19,6 @@ limitations under the License.
 #ifdef _WIN32
 #include <winerror.h>
 #endif
-#include "core/common/gsl_suppress.h"
 namespace onnxruntime {
 namespace common {
 
@@ -44,7 +43,9 @@ enum StatusCode {
   MODEL_LOADED = 8,
   NOT_IMPLEMENTED = 9,
   INVALID_GRAPH = 10,
-  EP_FAIL = 11
+  EP_FAIL = 11,
+  MODEL_LOAD_CANCELED = 12,
+  MODEL_REQUIRES_COMPILATION = 13,
 };
 
 constexpr const char* StatusCodeToString(StatusCode status) noexcept {
@@ -73,6 +74,10 @@ constexpr const char* StatusCodeToString(StatusCode status) noexcept {
       return "INVALID_GRAPH";
     case StatusCode::EP_FAIL:
       return "EP_FAIL";
+    case StatusCode::MODEL_LOAD_CANCELED:
+      return "MODEL_LOAD_CANCELED";
+    case StatusCode::MODEL_REQUIRES_COMPILATION:
+      return "MODEL_REQUIRES_COMPILATION";
     default:
       return "GENERAL ERROR";
   }
@@ -105,6 +110,10 @@ constexpr HRESULT StatusCodeToHRESULT(StatusCode status) noexcept {
       return HRESULT_FROM_WIN32(ERROR_FILE_CORRUPT);
     case StatusCode::EP_FAIL:
       return HRESULT_FROM_WIN32(ERROR_INTERNAL_ERROR);
+    case StatusCode::MODEL_LOAD_CANCELED:
+      return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    case StatusCode::MODEL_REQUIRES_COMPILATION:
+      return HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
     default:
       return E_FAIL;
   }
@@ -121,10 +130,8 @@ class [[nodiscard]] Status {
 
   Status(StatusCategory category, int code);
 
-  GSL_SUPPRESS(r.11)
   Status(const Status& other)
       : state_((other.state_ == nullptr) ? nullptr : new State(*other.state_)) {}
-  GSL_SUPPRESS(r.11)
   Status& operator=(const Status& other) {
     if (state_ != other.state_) {
       if (other.state_ == nullptr) {
@@ -188,4 +195,8 @@ inline std::ostream& operator<<(std::ostream& out, const Status& status) {
 }
 
 }  // namespace common
+
+// make Status directly available in the onnxruntime namespace as it is widely used
+using common::Status;
+
 }  // namespace onnxruntime

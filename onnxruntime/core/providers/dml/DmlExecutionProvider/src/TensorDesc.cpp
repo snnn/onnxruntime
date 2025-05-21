@@ -32,9 +32,9 @@ TensorDesc::TensorDesc(
 
     m_bufferTensorDesc.GuaranteedBaseOffsetAlignment = guaranteedBaseOffsetAlignment;
     m_bufferTensorDesc.TotalTensorSizeInBytes = DMLCalcBufferTensorSize(
-        m_bufferTensorDesc.DataType, 
-        m_bufferTensorDesc.DimensionCount, 
-        m_sizes, 
+        m_bufferTensorDesc.DataType,
+        m_bufferTensorDesc.DimensionCount,
+        m_sizes,
         strides ? m_strides : nullptr
         );
 }
@@ -79,7 +79,7 @@ TensorDesc::TensorDesc(
             dimension0 *= dimensions[i];
         }
 
-        for (size_t i = coerceAxis + 1, ci = dimensions.size(); i < ci; ++i)
+        for (size_t i = static_cast<int64_t>(coerceAxis) + 1, ci = dimensions.size(); i < ci; ++i)
         {
             dimension1 *= dimensions[i];
         }
@@ -201,63 +201,7 @@ TensorDesc::TensorDesc(
     assert(m_bufferTensorDesc.TotalTensorSizeInBytes >= ComputeByteSizeFromDimensions(nonBroadcastDimensions, dataType));
 }
 
-void TensorDesc::Remap64bitDmlDataTypeTo32bit()
-{
-    if (m_bufferTensorDesc.DataType != DML_TENSOR_DATA_TYPE_UINT64 &&
-        m_bufferTensorDesc.DataType != DML_TENSOR_DATA_TYPE_INT64)
-    {
-        return; // Nothing to do.
-    }
-
-    uint64_t endPaddingInBytes = 0;
-
-    // A workaround for older devices is to use strides to fake 64-bit memory access
-    // while only the lower 32 bits contains the data. This trick obviously doesn't
-    // work if the data element is genuine 64-bit. It also doesn't work if the data
-    // element is negative as the signed bit will be incorrectly interpreted.
-    m_bufferTensorDesc.DataType = Dml::Remap64bitDmlDataTypeTo32bit(m_bufferTensorDesc.DataType);
-
-    // If the strides haven't been calculated yet, initialize them as packed.
-    if (m_bufferTensorDesc.Strides == nullptr)
-    {
-        uint32_t stride = 1;
-        for (int i = m_bufferTensorDesc.DimensionCount - 1; i >= 0; i--)
-        {
-            m_strides[i] = stride;
-            stride *= m_sizes[i];
-        }
-    }
-
-    // Double the stride values to emulate 64-bit integer support.
-    for (uint32_t i = 0; i < m_bufferTensorDesc.DimensionCount; ++i)
-    {
-        m_strides[i] *= 2;
-    }
-
-    // The physical size of the tensor will have an extra 4 bytes at the end.
-    // DMLCalcBufferTensorSize calculates the minimum implied size, which is based on the last
-    // addressable element of the tensor plus the space for the last element. However, the size
-    // of the last element is now halved from 8 bytes to 4 bytes.
-    //
-    // Example:
-    // Original Tensor: size={2,3}, strides={3,1}, type=int64, size = (1+{1,2}*{3,1})*sizeof(int64) = 6 * 8 = 48
-    // Emulated Tensor: size={2,3}, strides={6,2}, type=int32, size = (1+{1,2}*{6,2})*sizeof(int32) = 11 * 4 = 44
-    //
-    // DirectML itself won't read/write the last 4 bytes, but we want the total size to be accurate
-    // so that the entire region can be zeroed.
-    endPaddingInBytes = sizeof(uint32_t);
-
-    m_bufferTensorDesc.Strides = m_strides;
-
-    m_bufferTensorDesc.TotalTensorSizeInBytes = DMLCalcBufferTensorSize(
-        m_bufferTensorDesc.DataType,
-        m_bufferTensorDesc.DimensionCount,
-        m_sizes,
-        m_strides
-        ) + endPaddingInBytes;
-}
-
-gsl::span<const uint32_t> TensorDesc::GetStrides() const
+gsl::span<const uint32_t> TensorDesc::GetStrides() const noexcept
 {
     if (m_bufferTensorDesc.Strides == nullptr)
     {
@@ -266,13 +210,33 @@ gsl::span<const uint32_t> TensorDesc::GetStrides() const
     return { m_strides, m_strides + m_bufferTensorDesc.DimensionCount };
 }
 
-DML_TENSOR_DESC TensorDesc::GetDmlDesc()
+void TensorDesc::SetStrides(gsl::span<const uint32_t> strides)
+{
+    if (!strides.empty())
+    {
+        ML_CHECK_VALID_ARGUMENT(strides.size() <= std::size(m_strides));
+        ML_CHECK_VALID_ARGUMENT(strides.size() == m_bufferTensorDesc.DimensionCount);
+        std::copy(strides.begin(), strides.end(), m_strides);
+    }
+
+    m_bufferTensorDesc.Strides = strides.empty() ? nullptr : m_strides;
+
+    m_bufferTensorDesc.TotalTensorSizeInBytes = DMLCalcBufferTensorSize(
+        m_bufferTensorDesc.DataType,
+        m_bufferTensorDesc.DimensionCount,
+        m_sizes,
+        strides.empty() ? nullptr : m_strides);
+}
+
+DML_TENSOR_DESC TensorDesc::GetDmlDesc() noexcept
 {
     if (m_tensorType == DML_TENSOR_TYPE_INVALID)
     {
         return { m_tensorType, nullptr };
     }
 
+    // Update the DML_BUFFER_TENSOR_DESC Sizes and Strides pointers to point internally to the TensorDesc fields.
+    // This update matters whether it was a new instance or a copy from via copy constructor from another TensorDesc.
     m_bufferTensorDesc.Sizes = m_sizes;
     if (m_bufferTensorDesc.Strides)
     {
@@ -288,7 +252,7 @@ DML_TENSOR_DESC TensorDesc::GetDmlDesc()
 // requires coercion by the caller.
 void TensorDesc::ForceUnsignedDataType()
 {
-    static_assert(ApiTraits::EnumValueCount<DML_TENSOR_DATA_TYPE> == 12, "New tensor data type.  Update cases.");
+    static_assert(ApiTraits::EnumValueCount<DML_TENSOR_DATA_TYPE> == 14, "New tensor data type.  Update cases.");
 
     switch (m_bufferTensorDesc.DataType)
     {
@@ -308,15 +272,29 @@ void TensorDesc::ForceUnsignedDataType()
         m_bufferTensorDesc.DataType = DML_TENSOR_DATA_TYPE_UINT8;
         break;
 
+    case DML_TENSOR_DATA_TYPE_INT4:
+        m_bufferTensorDesc.DataType = DML_TENSOR_DATA_TYPE_UINT4;
+        break;
+
     // Nothing to do if already unsigned.
     case DML_TENSOR_DATA_TYPE_UINT64:
     case DML_TENSOR_DATA_TYPE_UINT32:
     case DML_TENSOR_DATA_TYPE_UINT16:
     case DML_TENSOR_DATA_TYPE_UINT8:
+    case DML_TENSOR_DATA_TYPE_UINT4:
         break;
 
     default:
         ML_INVALID_ARGUMENT("Can't coerce unknown or non-integral data type");
+    }
+}
+
+// Add additional padding 1's to ensure the count is at least that large.
+void TensorDesc::EnsureDimensionCount(uint32_t newDimensionCount, TensorAxis alignment)
+{
+    if (m_bufferTensorDesc.DimensionCount < newDimensionCount)
+    {
+        SetDimensionCount(newDimensionCount, alignment);
     }
 }
 
@@ -350,4 +328,50 @@ void TensorDesc::SetDimensionCount(uint32_t newDimensionCount, TensorAxis alignm
         std::fill(&m_strides[fillOffset], &m_strides[fillOffset] + fillCount, 0u);
     }
     m_bufferTensorDesc.DimensionCount = newDimensionCount;
+}
+
+void TensorDesc::SetDimensionsAndStrides(gsl::span<const uint32_t> sizes, gsl::span<const uint32_t> strides)
+{
+    static_assert(sizeof(m_sizes) == sizeof(m_strides));
+    ML_CHECK_VALID_ARGUMENT(sizes.size() <= std::size(m_sizes));
+    ML_CHECK_VALID_ARGUMENT(strides.empty() || strides.size() == sizes.size());
+
+    std::copy(sizes.begin(), sizes.end(), m_sizes);
+    m_bufferTensorDesc.DimensionCount = static_cast<uint32_t>(sizes.size());
+    SetStrides(strides);
+}
+
+void TensorDesc::PermuteDimensions(gsl::span<const uint32_t> dimensionMapping, const TensorAxis alignment)
+{
+    const uint32_t oldRank = m_bufferTensorDesc.DimensionCount;
+    EnsureStridesExist();
+    SetDimensionCount(static_cast<uint32_t>(dimensionMapping.size()), alignment);
+
+    // Shuffle m_sizes and m_strides according to the indexes pointed by dimensionMapping.
+    // Note using MaximumDimensionCount instead of oldRank is intentional here, because the old rank could
+    // be smaller or larger than the new rank, but it will never be larger than MaximumDimensionCount.
+    std::vector<uint32_t> oldSizes{m_sizes, m_sizes + MaximumDimensionCount};
+    std::vector<uint32_t> oldStrides{m_strides, m_strides + MaximumDimensionCount};
+
+    for (size_t i = 0; i < dimensionMapping.size(); i++)
+    {
+        uint32_t sourceAxis = dimensionMapping[i];
+        m_sizes[i] = sourceAxis < oldRank ? oldSizes[sourceAxis] : 1;
+        m_strides[i] = sourceAxis < oldRank ? oldStrides[sourceAxis] : 0;
+    }
+
+    m_bufferTensorDesc.Sizes = m_sizes;
+    m_bufferTensorDesc.Strides = m_strides;
+}
+
+void TensorDesc::EnsureStridesExist() noexcept
+{
+    if (m_bufferTensorDesc.Strides != nullptr)
+    {
+        // Strides are already populated
+        return;
+    }
+
+    GetDescendingPackedStrides({m_sizes, m_bufferTensorDesc.DimensionCount}, {m_strides, m_bufferTensorDesc.DimensionCount});
+    m_bufferTensorDesc.Strides = m_strides;
 }

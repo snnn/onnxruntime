@@ -53,7 +53,7 @@ class Gemm : public onnxruntime::Gemm<T> {
     int64_t N = helper.N();
     auto Y = context->Output(0, TensorShape({M, N}));
 
-    if (trans_A_ == CblasTrans) { // transpose input
+    if (trans_A_ == CblasTrans) {  // transpose input
       LOGS_DEFAULT(WARNING) << "Transposed input not supported ; defaulting to cpu implementation";
       return onnxruntime::Gemm<T>::Compute(context);
     }
@@ -69,17 +69,16 @@ class Gemm : public onnxruntime::Gemm<T> {
     LOGS_DEFAULT(VERBOSE) << "trans_A_ " << (trans_A_ == CblasTrans);
     LOGS_DEFAULT(VERBOSE) << "trans_B_ " << (trans_B_ == CblasTrans);
 
-    const T* x_data = X->template Data<T>();
-    const T* w_data = W->template Data<T>();
+    const T* x_data = X->Data<T>();
+    const T* w_data = W->Data<T>();
     const T* b_data;
     if (useBias)
-      b_data = B->template Data<T>();
-    T* y_data = Y->template MutableData<T>();
+      b_data = B->Data<T>();
+    T* y_data = Y->MutableData<T>();
 
     armnn::NetworkId* pNetworkId;
     GEMMLayersIterator it = Gemm::gemmLayers.find((OpKernel*)this);
     if (it == Gemm::gemmLayers.end()) {
-      
       armnn::NetworkId networkId;
 
       armnn::INetworkPtr myNetwork = armnn::INetwork::Create();
@@ -99,8 +98,8 @@ class Gemm : public onnxruntime::Gemm<T> {
 
       if (fcDescriptor.m_BiasEnabled) {
         armnn::TensorShape biasShape = ArmNNTensorShape(B->Shape());
-        if(B->Shape().NumDimensions() == 2){
-          if(B->Shape().GetDims()[0] == 1 && B->Shape().GetDims()[1] > 1) {
+        if (B->Shape().NumDimensions() == 2) {
+          if (B->Shape().GetDims()[0] == 1 && B->Shape().GetDims()[1] > 1) {
             biasShape = {B->Shape().GetDims()[1]};
             LOGS_DEFAULT(VERBOSE) << "Bias reshaped to: {" << B->Shape().GetDims()[1] << "}";
           }
@@ -118,20 +117,20 @@ class Gemm : public onnxruntime::Gemm<T> {
                                                      "fc_armnn");
       }
 
-      armnn::IConnectableLayer *InputLayer  = myNetwork->AddInputLayer(0);
-      armnn::IConnectableLayer *OutputLayer = myNetwork->AddOutputLayer(0);
+      armnn::IConnectableLayer* InputLayer = myNetwork->AddInputLayer(0);
+      armnn::IConnectableLayer* OutputLayer = myNetwork->AddOutputLayer(0);
 
       InputLayer->GetOutputSlot(0).Connect(fc_armnn->GetInputSlot(0));
       fc_armnn->GetOutputSlot(0).Connect(OutputLayer->GetInputSlot(0));
 
-      //Set the tensors in the network.
+      // Set the tensors in the network.
       armnn::TensorInfo inputTensorInfo(inputShape, armnn::DataType::Float32);
       InputLayer->GetOutputSlot(0).SetTensorInfo(inputTensorInfo);
 
       armnn::TensorInfo outputTensorInfo(outputShape, armnn::DataType::Float32);
       fc_armnn->GetOutputSlot(0).SetTensorInfo(outputTensorInfo);
 
-      // Optimise ArmNN network
+      // Optimize ArmNN network
       armnn::IOptimizedNetworkPtr optNet = armnn::Optimize(*myNetwork, {armnn::Compute::CpuAcc}, Gemm::run->GetDeviceSpec());
 
       if (optNet == nullptr) {
@@ -151,7 +150,7 @@ class Gemm : public onnxruntime::Gemm<T> {
     }
 
     armnn::InputTensors inputTensors{{0, armnn::ConstTensor(Gemm::run->GetInputTensorInfo(*pNetworkId, 0),
-                                                          x_data)}};
+                                                            x_data)}};
     armnn::OutputTensors outputTensors{{0, armnn::Tensor(Gemm::run->GetOutputTensorInfo(*pNetworkId, 0),
                                                          y_data)}};
 
@@ -166,8 +165,8 @@ class Gemm : public onnxruntime::Gemm<T> {
     gemmLayers.erase(this);
   }
 
-  static armnn::IRuntimePtr initRuntime(){
-    if(Gemm::run)
+  static armnn::IRuntimePtr initRuntime() {
+    if (Gemm::run)
       return std::move(Gemm::run);
     armnn::IRuntime::CreationOptions options;
     return std::move(armnn::IRuntime::Create(options));

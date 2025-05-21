@@ -8,7 +8,6 @@
 #define NO_IMPORT_ARRAY
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #define PY_ARRAY_UNIQUE_SYMBOL onnxruntime_python_ARRAY_API
-#include <numpy/arrayobject.h>
 #include "python/numpy_helper.h"
 
 #include "core/framework/tensor_shape.h"
@@ -42,7 +41,7 @@ struct MakeDType {
 
 /// <summary>
 /// The function creates a numpy array that points to
-/// data stored within the corresponing tensor. Parent object
+/// data stored within the corresponding tensor. Parent object
 /// holds a reference to the object that owns the data so it
 /// does not disappear.
 /// </summary>
@@ -140,7 +139,7 @@ void addSparseTensorMethods(pybind11::module& m) {
 
                     TensorShape dense_shape(py_dense_shape);
                     auto values_type = GetNumpyArrayType(py_values);
-                    auto ml_type = NumpyToOnnxRuntimeTensorType(values_type);
+                    auto ml_type = NumpyTypeToOnnxRuntimeTensorType(values_type);
 
                     std::unique_ptr<PySparseTensor> result;
                     if (IsNumericNumpyType(values_type)) {
@@ -199,7 +198,7 @@ void addSparseTensorMethods(pybind11::module& m) {
 
             TensorShape dense_shape(py_dense_shape);
             auto values_type = GetNumpyArrayType(py_values);
-            auto ml_type = NumpyToOnnxRuntimeTensorType(values_type);
+            auto ml_type = NumpyTypeToOnnxRuntimeTensorType(values_type);
 
             std::unique_ptr<PySparseTensor> result;
             if (IsNumericNumpyType(values_type)) {
@@ -262,7 +261,7 @@ void addSparseTensorMethods(pybind11::module& m) {
             TensorShape values_shape = GetShape(py_values);
             TensorShape index_shape = GetShape(py_indices);
             auto values_type = GetNumpyArrayType(py_values);
-            auto ml_type = NumpyToOnnxRuntimeTensorType(values_type);
+            auto ml_type = NumpyTypeToOnnxRuntimeTensorType(values_type);
 
             std::unique_ptr<PySparseTensor> result;
             if (IsNumericNumpyType(values_type)) {
@@ -305,18 +304,7 @@ void addSparseTensorMethods(pybind11::module& m) {
         if (sparse_tensor.IsDataTypeString()) {
           // Strings can not be on GPU and require conversion UTF-8 to Python UNICODE
           // We need to create a copy.
-          const int numpy_type = OnnxRuntimeTensorToNumpyType(DataTypeImpl::GetType<std::string>());
-          ORT_ENFORCE(NPY_OBJECT == numpy_type, "We are expecting to map strings to NPY_OBJECT type");
-          const auto& values_shape = sparse_tensor.Values().Shape();
-          py::dtype dtype("object");
-          py::array result(dtype, values_shape.GetDims(), {});
-          auto* out_ptr = static_cast<py::object*>(
-              PyArray_DATA(reinterpret_cast<PyArrayObject*>(result.ptr())));
-          const std::string* src = sparse_tensor.Values().Data<std::string>();
-          for (int64_t i = 0, size = values_shape.Size(); i < size; ++i, src++) {
-            out_ptr[i] = py::cast(*src);
-          }
-          return result;
+          return StringTensorToNumpyArray(sparse_tensor.Values());
         } else {
           utils::MLTypeCallDispatcher<float, double, int8_t, uint8_t, int16_t, uint16_t, int32_t, uint32_t, int64_t, uint64_t>
               t_disp(sparse_tensor.GetElementType());
@@ -376,7 +364,7 @@ void addSparseTensorMethods(pybind11::module& m) {
         auto gpu_transfer = GetGPUDataTransfer();
         auto dest_tensor = std::make_unique<SparseTensor>(sparse_tensor.DataType(), sparse_tensor.DenseShape(),
                                                           std::move(cuda_allocator));
-        ORT_THROW_IF_ERROR(sparse_tensor.Copy(*gpu_transfer, *dest_tensor, 0));
+        ORT_THROW_IF_ERROR(sparse_tensor.Copy(*gpu_transfer, *dest_tensor));
         auto result = std::make_unique<PySparseTensor>(std::move(dest_tensor));
         return result;
 #else
@@ -386,7 +374,7 @@ void addSparseTensorMethods(pybind11::module& m) {
       })
       .def("dense_shape", [](const PySparseTensor* py_tensor) -> py::list {
         const SparseTensor& st = py_tensor->Instance();
-        const auto& dims = st.DenseShape().GetDims();
+        const auto dims = st.DenseShape().GetDims();
         // We create a copy of dimensions, it is small
         py::list py_dims;
         for (auto d : dims) {
@@ -408,9 +396,8 @@ void addSparseTensorMethods(pybind11::module& m) {
       })
       // pybind apparently has a bug with returning enums from def_property_readonly or methods
       // returning a method object instead of the enumeration value
-      // so we are using def_property and throw on a potential modificaiton
-      .def_property(
-          "format", [](const PySparseTensor* py_tensor) -> OrtSparseFormat {
+      // so we are using def_property and throw on a potential modification
+      .def_property("format", [](const PySparseTensor* py_tensor) -> OrtSparseFormat {
         const SparseTensor& tensor = py_tensor->Instance();
         auto retval = OrtSparseFormat::ORT_SPARSE_UNDEFINED;
         switch (tensor.Format()) {

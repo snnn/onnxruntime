@@ -1,6 +1,5 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
-
 #include "onnxruntime_pybind_mlvalue.h"
 #include "python/onnxruntime_pybind_state_common.h"
 #include "pybind11/numpy.h"
@@ -8,7 +7,6 @@
 #define NO_IMPORT_ARRAY
 #define NPY_NO_DEPRECATED_API NPY_1_7_API_VERSION
 #define PY_ARRAY_UNIQUE_SYMBOL onnxruntime_python_ARRAY_API
-#include <numpy/arrayobject.h>
 #include "python/numpy_helper.h"
 
 #include "core/graph/graph.h"
@@ -25,6 +23,20 @@
 #include "core/framework/kernel_registry.h"
 #include "core/framework/provider_options_utils.h"
 
+#ifdef USE_DML
+using Microsoft::WRL::ComPtr;
+
+#include <wil/wrl.h>
+#include "core/providers/dml/DmlExecutionProvider/src/External/D3DX12/d3dx12.h"
+#include "core/providers/dml/DmlExecutionProvider/src/ErrorHandling.h"
+#include "core/providers/dml/DmlExecutionProvider/src/DescriptorPool.h"
+#include "core/providers/dml/DmlExecutionProvider/src/DmlCommittedResourceAllocator.h"
+#include "core/providers/dml/DmlExecutionProvider/inc/DmlExecutionProvider.h"
+#include "core/providers/dml/DmlExecutionProvider/src/BucketizedBufferAllocator.h"
+#include "core/providers/dml/DmlExecutionProvider/src/PooledUploadHeap.h"
+#include "core/providers/dml/DmlExecutionProvider/src/ReadbackHeap.h"
+#include "core/providers/dml/DmlExecutionProvider/src/AllocationInfo.h"
+#endif
 namespace onnxruntime {
 namespace python {
 
@@ -75,15 +87,15 @@ static TensorShape GetArrayShape(PyArrayObject* pyObject) {
   const int ndim = PyArray_NDIM(pyObject);
   const npy_intp* npy_dims = PyArray_DIMS(pyObject);
   auto span = gsl::make_span(npy_dims, ndim);
-  std::vector<int64_t> dims(span.cbegin(), span.cend());
-  TensorShape shape(std::move(dims));
+  TensorShapeVector shape_vec(span.begin(), span.end());
+  TensorShape shape(shape_vec);
   return shape;
 }
 
 TensorShape GetShape(const py::array& arr) {
   auto span = gsl::make_span(arr.shape(), arr.ndim());
-  std::vector<int64_t> dims(span.cbegin(), span.cend());
-  TensorShape shape(std::move(dims));
+  TensorShapeVector shape_vec(span.begin(), span.end());
+  TensorShape shape(shape_vec);
   return shape;
 }
 
@@ -108,6 +120,20 @@ OrtMemoryInfo GetMemoryInfoPerDeviceType(const OrtDevice& ort_device) {
     ORT_THROW("Unsupported OrtDevice type: ", ort_device.Type());
   }
   return mem_info;
+}
+
+int32_t GetTensorProtoType(const OrtValue& ort_value) {
+  if (ort_value.IsTensor()) {
+    return ort_value.Get<Tensor>().GetElementType();
+#if !defined(DISABLE_SPARSE_TENSORS)
+  } else if (ort_value.IsSparseTensor()) {
+    return ort_value.Get<SparseTensor>().GetElementType();
+#endif
+  } else if (ort_value.IsTensorSequence()) {
+    return ort_value.Get<TensorSeq>().DataType()->AsPrimitiveDataType()->GetDataType();
+  } else {
+    throw std::runtime_error("Tensor proto_type is unavailable for this value.");
+  }
 }
 
 #ifdef USE_CUDA
@@ -146,19 +172,178 @@ AllocatorPtr GetCudaAllocator(OrtDevice::DeviceId id) {
   // Current approach is not thread-safe, but there are some bigger infra pieces to put together in order to make
   // multi-threaded CUDA allocation work we need to maintain a per-thread CUDA allocator
 
-  static auto* id_to_allocator_map = new std::unordered_map<OrtDevice::DeviceId, AllocatorPtr>();
+  // We are leaking this map so we do not accidentally destroy CUDA Allocator instance
+  // after we unloaded CUDA provider library. Appeasing static analysis warning and using make_unique.
+  static auto* id_to_allocator_map = std::make_unique<std::unordered_map<OrtDevice::DeviceId, AllocatorPtr>>().release();
 
-  if (id_to_allocator_map->find(id) == id_to_allocator_map->end()) {
+  auto hit = id_to_allocator_map->find(id);
+  if (hit == id_to_allocator_map->end()) {
     // TODO: Expose knobs so that users can set fields associated with OrtArenaCfg so that we can pass it to the following method
-    id_to_allocator_map->insert({id, GetProviderInfo_CUDA().CreateCudaAllocator(id, gpu_mem_limit, arena_extend_strategy, external_allocator_info, nullptr)});
+    auto cuda_allocator = GetProviderInfo_CUDA().CreateCudaAllocator(id, gpu_mem_limit, arena_extend_strategy, external_allocator_info, nullptr);
+    hit = id_to_allocator_map->emplace(id, std::move(cuda_allocator)).first;
   }
 
-  return (*id_to_allocator_map)[id];
+  return hit->second;
 }
 
 std::unique_ptr<IDataTransfer> GetGPUDataTransfer() {
   // Using default stream
-  return GetProviderInfo_CUDA().CreateGPUDataTransfer(nullptr);
+  return GetProviderInfo_CUDA().CreateGPUDataTransfer();
+}
+
+#endif
+
+#ifdef USE_DML
+
+constexpr GUID dml_readback_heap_guid = {0x00d32df8, 0xea2d, 0x40bf, {0xa4, 0x47, 0x9c, 0xb4, 0xbc, 0xf1, 0x1d, 0x5e}};
+constexpr GUID dml_upload_heap_guid = {0x125235f9, 0xef41, 0x4043, {0xa4, 0x9d, 0xdd, 0xc9, 0x61, 0xe7, 0xdb, 0xee}};
+
+AllocatorPtr GetDmlAllocator(OrtDevice::DeviceId id) {
+  // Current approach is not thread-safe, but there are some bigger infra pieces to put together in order to make
+  // multi-threaded DML allocation work, including maintaining a per-thread DML allocator.
+
+  // We are leaking this map so we do not accidentally destroy the DML Allocator instance
+  // after we unloaded DML provider library. Appeasing static analysis warning and using make_unique.
+  static auto* id_to_allocator_map = std::make_unique<std::unordered_map<OrtDevice::DeviceId, AllocatorPtr>>().release();
+
+  auto hit = id_to_allocator_map->find(id);
+  if (hit == id_to_allocator_map->end()) {
+    constexpr uint32_t device_id = 0;
+    auto d3d12_device = onnxruntime::DMLProviderFactoryCreator::CreateD3D12Device(device_id, false);
+
+    ComPtr<Dml::ExecutionContext> context;
+    uint32_t execution_context_ptr_size = gsl::narrow_cast<uint32_t>(sizeof(context.GetAddressOf()));
+
+    // First, check if an I/O binding API that was used before this session or another session has already created a queue
+    if (FAILED(d3d12_device->GetPrivateData(dml_execution_context_guid, &execution_context_ptr_size, context.GetAddressOf()))) {
+      D3D12_COMMAND_QUEUE_DESC cmd_queue_desc = {};
+      cmd_queue_desc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+      cmd_queue_desc.Flags = D3D12_COMMAND_QUEUE_FLAG_DISABLE_GPU_TIMEOUT;
+
+      ComPtr<ID3D12CommandQueue> cmd_queue;
+      ORT_THROW_IF_FAILED(d3d12_device->CreateCommandQueue(&cmd_queue_desc, IID_PPV_ARGS(cmd_queue.ReleaseAndGetAddressOf())));
+
+      auto dml_device = onnxruntime::DMLProviderFactoryCreator::CreateDMLDevice(d3d12_device.Get());
+      ORT_THROW_IF_FAILED(d3d12_device->SetPrivateDataInterface(dml_device_guid, dml_device.Get()));
+
+      context = wil::MakeOrThrow<Dml::ExecutionContext>(d3d12_device.Get(), dml_device.Get(), cmd_queue.Get(), true, true);
+      ORT_THROW_IF_FAILED(d3d12_device->SetPrivateDataInterface(dml_execution_context_guid, context.Get()));
+    }
+
+    // We leak the readback and upload heap to keep them alive, just like the map
+    auto readback_heap = std::make_unique<Dml::ReadbackHeap>(d3d12_device.Get(), context.Get()).release();
+    auto upload_heap = std::make_unique<Dml::PooledUploadHeap>(d3d12_device.Get(), context.Get()).release();
+
+    auto dml_allocator = std::make_shared<Dml::BucketizedBufferAllocator>(
+        d3d12_device.Get(),
+        context.Get(),
+        CD3DX12_HEAP_PROPERTIES(D3D12_HEAP_TYPE_DEFAULT),
+        D3D12_HEAP_FLAG_NONE,
+        D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS,
+        D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+        std::make_unique<Dml::DmlCommittedResourceAllocator>(d3d12_device.Get()));
+    dml_allocator->SetDefaultRoundingMode(AllocatorRoundingMode::Enabled);
+    context->SetAllocator(dml_allocator);
+
+    ORT_THROW_IF_FAILED(d3d12_device->SetPrivateData(dml_readback_heap_guid, sizeof(readback_heap), &readback_heap));
+    ORT_THROW_IF_FAILED(d3d12_device->SetPrivateData(dml_upload_heap_guid, sizeof(upload_heap), &upload_heap));
+
+    hit = id_to_allocator_map->emplace(id, std::move(dml_allocator)).first;
+  }
+
+  return hit->second;
+}
+
+void CpuToDmlMemCpy(void* dst, const void* src, size_t num_bytes) {
+  const auto* allocInfo = static_cast<const Dml::AllocationInfo*>(dst);
+  ID3D12Resource* dst_data = allocInfo->GetResource();
+
+  ComPtr<ID3D12Device> d3d12_device;
+  ORT_THROW_IF_FAILED(dst_data->GetDevice(IID_PPV_ARGS(d3d12_device.ReleaseAndGetAddressOf())));
+
+  Dml::PooledUploadHeap* upload_heap = nullptr;
+  uint32_t upload_heap_size = gsl::narrow_cast<uint32_t>(sizeof(upload_heap));
+  ORT_THROW_IF_FAILED(d3d12_device->GetPrivateData(dml_upload_heap_guid, &upload_heap_size, &upload_heap));
+
+  upload_heap->BeginUploadToGpu(
+      dst_data, 0, D3D12_RESOURCE_STATE_UNORDERED_ACCESS, gsl::make_span(static_cast<const std::byte*>(src), num_bytes));
+}
+
+void DmlToCpuMemCpy(void* dst, const void* src, size_t num_bytes) {
+  const auto* allocInfo = static_cast<const Dml::AllocationInfo*>(src);
+  ID3D12Resource* src_data = allocInfo->GetResource();
+
+  ComPtr<ID3D12Device> d3d12_device;
+  ORT_THROW_IF_FAILED(src_data->GetDevice(IID_PPV_ARGS(d3d12_device.ReleaseAndGetAddressOf())));
+
+  Dml::ReadbackHeap* readback_heap = nullptr;
+  uint32_t readback_heap_size = gsl::narrow_cast<uint32_t>(sizeof(readback_heap));
+  ORT_THROW_IF_FAILED(d3d12_device->GetPrivateData(dml_readback_heap_guid, &readback_heap_size, &readback_heap));
+
+  // ReadbackFromGpu already syncs with the CPU and waits for the copy to be completed, so we dont need to sync after
+  // this call
+  readback_heap->ReadbackFromGpu(
+      gsl::make_span(static_cast<std::byte*>(dst), num_bytes),
+      src_data,
+      0,
+      D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+}
+
+const std::unordered_map<OrtDevice::DeviceType, MemCpyFunc>* GetDmlToHostMemCpyFunction() {
+  static std::unordered_map<OrtDevice::DeviceType, MemCpyFunc> map{
+      {OrtDevice::DML, DmlToCpuMemCpy}};
+
+  return &map;
+}
+
+#endif
+
+#ifdef USE_CANN
+void CpuToCannMemCpy(void* dst, const void* src, size_t num_bytes) {
+  GetProviderInfo_CANN().cannMemcpy_HostToDevice(dst, src, num_bytes);
+}
+
+void CannToCpuMemCpy(void* dst, const void* src, size_t num_bytes) {
+  GetProviderInfo_CANN().cannMemcpy_DeviceToHost(dst, src, num_bytes);
+}
+
+const std::unordered_map<OrtDevice::DeviceType, MemCpyFunc>* GetCannToHostMemCpyFunction() {
+  static std::unordered_map<OrtDevice::DeviceType, MemCpyFunc> map{
+      {OrtDevice::NPU, CannToCpuMemCpy}};
+
+  return &map;
+}
+
+bool IsCannDeviceIdValid(const onnxruntime::logging::Logger& logger, int id) {
+  int num_devices = GetProviderInfo_CANN().cannGetDeviceCount();
+
+  if (0 == num_devices) {
+    LOGS(logger, WARNING) << "your system does not have a CANN capable device.";
+    return false;
+  }
+
+  if (id < 0 || id >= num_devices) {
+    LOGS(logger, WARNING) << "cann_device=" << id << " is invalid, must choose device ID between 0 and "
+                          << num_devices - 1;
+    return false;
+  }
+
+  return true;
+}
+
+AllocatorPtr GetCannAllocator(OrtDevice::DeviceId id) {
+  size_t npu_mem_limit = std::numeric_limits<size_t>::max();
+  onnxruntime::ArenaExtendStrategy arena_extend_strategy = onnxruntime::ArenaExtendStrategy::kNextPowerOfTwo;
+
+  static auto* id_to_allocator_map =
+      std::make_unique<std::unordered_map<OrtDevice::DeviceId, AllocatorPtr>>().release();
+  auto hit = id_to_allocator_map->find(id);
+  if (hit == id_to_allocator_map->end()) {
+    auto cann_allocator = GetProviderInfo_CANN().CreateCannAllocator(id, npu_mem_limit, arena_extend_strategy, nullptr);
+    hit = id_to_allocator_map->emplace(id, std::move(cann_allocator)).first;
+  }
+
+  return hit->second;
 }
 
 #endif
@@ -236,37 +421,14 @@ int OnnxRuntimeTensorToNumpyType(const DataTypeImpl* tensor_type) {
   }
 }
 
-MLDataType NumpyTypeToOnnxRuntimeType(int numpy_type) {
-  static std::map<int, MLDataType> type_map{
-      {NPY_BOOL, DataTypeImpl::GetType<bool>()},
-      {NPY_FLOAT, DataTypeImpl::GetType<float>()},
-      {NPY_FLOAT16, DataTypeImpl::GetType<MLFloat16>()},
-      {NPY_DOUBLE, DataTypeImpl::GetType<double>()},
-      {NPY_INT8, DataTypeImpl::GetType<int8_t>()},
-      {NPY_UINT8, DataTypeImpl::GetType<uint8_t>()},
-      {NPY_INT16, DataTypeImpl::GetType<int16_t>()},
-      {NPY_UINT16, DataTypeImpl::GetType<uint16_t>()},
-      {NPY_INT, DataTypeImpl::GetType<int32_t>()},
-      {NPY_UINT, DataTypeImpl::GetType<uint32_t>()},
-      {NPY_LONGLONG, DataTypeImpl::GetType<int64_t>()},
-      {NPY_ULONGLONG, DataTypeImpl::GetType<uint64_t>()},
-      {NPY_OBJECT, DataTypeImpl::GetType<std::string>()}};
-  const auto it = type_map.find(numpy_type);
-  if (it == type_map.end()) {
-    throw std::runtime_error("No corresponding Numpy type for Tensor Type.");
-  } else {
-    return it->second;
-  }
-}
-
-MLDataType NumpyToOnnxRuntimeTensorType(int numpy_type) {
+MLDataType NumpyTypeToOnnxRuntimeTensorType(int numpy_type) {
   static std::map<int, MLDataType> type_map{
       {NPY_BOOL, DataTypeImpl::GetType<bool>()},
       {NPY_FLOAT, DataTypeImpl::GetType<float>()},
       // Special, not a C type expands to enum value of 16
       {NPY_FLOAT16, DataTypeImpl::GetType<MLFloat16>()},
       {NPY_DOUBLE, DataTypeImpl::GetType<double>()},
-      // We don't want to use size specific types such
+      // We dont want to use size specific types such
       // as NPY_INT32 bc they are not enums but hash defines
       // which may map into other enums and may conflict with other entries here
       // also NPY docs define these sizes as platform specific, thus we
@@ -303,6 +465,10 @@ MLDataType NumpyToOnnxRuntimeTensorType(int numpy_type) {
   } else {
     return it->second;
   }
+}
+
+MLDataType OnnxTypeToOnnxRuntimeTensorType(int onnx_element_type) {
+  return DataTypeImpl::TensorTypeFromONNXEnum(onnx_element_type)->GetElementType();
 }
 
 // This is a one time use, ad-hoc allocator that allows Tensors to take ownership of
@@ -415,15 +581,17 @@ static void CopyDataToTensor(PyArrayObject* darray, int npy_type, Tensor& tensor
     for (int i = 0; i < total_items; ++i, src += item_size) {
       // Python unicode strings are assumed to be USC-4. Strings are stored as UTF-8.
       PyObject* item = PyArray_GETITEM(darray, src);
+      UniqueDecRefPtr<PyObject> itemGuard(item, DecRefFn<PyObject>());
       PyObject* pStr = PyObject_Str(item);
       UniqueDecRefPtr<PyObject> strGuard(pStr, DecRefFn<PyObject>());
       dst[i] = py::reinterpret_borrow<py::str>(pStr);
     }
   } else {
     void* buffer = tensor.MutableDataRaw();
-    size_t len;
-    if (!IAllocator::CalcMemSizeForArray(tensor.DataType()->Size(), tensor.Shape().Size(), &len)) {
-      throw std::runtime_error("length overflow");
+    size_t len = 0;
+    Status status = Tensor::CalculateTensorStorageSize(tensor.DataType(), tensor.Shape(), /*alignment*/ 0, len);
+    if (!status.IsOK()) {
+      throw std::runtime_error(status.ErrorMessage());
     }
     mem_cpy_to_device(buffer, PyArray_DATA(darray), len);
   }
@@ -452,7 +620,7 @@ static std::unique_ptr<Tensor> CreateTensor(const AllocatorPtr& alloc, const std
 
   const int npy_type = PyArray_TYPE(darray);
   TensorShape shape = GetArrayShape(darray);
-  auto element_type = NumpyToOnnxRuntimeTensorType(npy_type);
+  auto element_type = NumpyTypeToOnnxRuntimeTensorType(npy_type);
   if (IsNumericNumpyType(npy_type) && use_numpy_data_memory) {
     if (pyObject == darray) {
       // Use the memory of numpy array directly. The ownership belongs to the calling
@@ -487,7 +655,12 @@ static bool CheckIfInputIsSequenceType(const std::string& name_input,
   if (!temp) {
     throw std::runtime_error("Corresponding type_proto is null");
   } else {
-    type_proto = *temp;
+    if (temp->has_optional_type()) {
+      const ::onnx::TypeProto_Optional& optional_type_proto = temp->optional_type();
+      type_proto = optional_type_proto.elem_type();
+    } else {
+      type_proto = *temp;
+    }
   }
 
   return type_proto.has_sequence_type();
@@ -500,26 +673,24 @@ static void CreateSequenceOfTensors(AllocatorPtr alloc, const std::string& name_
     throw std::runtime_error("Input is not of sequence type");
   }
 
+  // set the seq type
+  MLDataType seq_dtype = OrtTypeInfo::ElementTypeFromProto(
+      static_cast<ONNX_NAMESPACE::TensorProto_DataType>(type_proto.sequence_type().elem_type().tensor_type().elem_type()));
+  auto p_seq_tensors = std::make_unique<TensorSeq>(seq_dtype);
+
   // populate the seq
-  std::vector<Tensor> tensors;
   auto list_size = PyList_Size(pylist_obj);
   if (list_size > 0) {
-    tensors.resize(list_size);
     for (Py_ssize_t i = 0; i < list_size; ++i) {
       auto* py_obj = PyList_GetItem(pylist_obj, i);
       if (!PyObjectCheck_NumpyArray(py_obj)) {
         throw std::runtime_error("CreateSequenceOfTensors: Input is not a tensor");
       }
       auto p_tensor = CreateTensor(alloc, name_input, reinterpret_cast<PyArrayObject*>(py_obj));
-      tensors[i] = std::move(*p_tensor);
+      p_seq_tensors->Add(std::move(*p_tensor));
     }
   }
 
-  // set the seq type
-  MLDataType seq_dtype = OrtTypeInfo::ElementTypeFromProto(
-      static_cast<ONNX_NAMESPACE::TensorProto_DataType>(type_proto.sequence_type().elem_type().tensor_type().elem_type()));
-  auto p_seq_tensors = std::make_unique<TensorSeq>(seq_dtype);
-  p_seq_tensors->SetElements(std::move(tensors));
   auto ml_tensor_sequence = DataTypeImpl::GetType<TensorSeq>();
   p_mlvalue->Init(p_seq_tensors.release(),
                   ml_tensor_sequence,
@@ -544,7 +715,7 @@ static void CreateTensorMLValue(const AllocatorPtr& alloc, const std::string& na
 static void CreateTensorMLValueOwned(const OrtPybindSingleUseAllocatorPtr& pybind_alloc, const AllocatorPtr& alloc, OrtValue* p_mlvalue) {
   auto npy_type = PyArray_TYPE(pybind_alloc->GetContiguous());
   TensorShape shape = GetArrayShape(pybind_alloc->GetContiguous());
-  auto element_type = NumpyToOnnxRuntimeTensorType(npy_type);
+  auto element_type = NumpyTypeToOnnxRuntimeTensorType(npy_type);
 
   std::unique_ptr<Tensor> p_tensor;
 

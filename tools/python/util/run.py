@@ -1,18 +1,26 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
+from __future__ import annotations
 
 import logging
 import os
 import shlex
 import subprocess
 
-
 _log = logging.getLogger("util.run")
 
 
-def run(*args, cwd=None,
-        input=None, capture_stdout=False, capture_stderr=False,
-        shell=False, env=None, check=True, quiet=False):
+def run(
+    *args,
+    cwd=None,
+    input=None,
+    capture_stdout=False,
+    capture_stderr=False,
+    shell=False,
+    env=None,
+    check=True,
+    quiet=False,
+):
     """Runs a subprocess.
 
     Args:
@@ -32,19 +40,24 @@ def run(*args, cwd=None,
     """
     cmd = [*args]
 
-    _log.info("Running subprocess in '{0}'\n  {1}".format(
-        cwd or os.getcwd(), " ".join([shlex.quote(arg) for arg in cmd])))
+    _log.info(
+        "Running subprocess in '{}'\n  {}".format(cwd or os.getcwd(), " ".join([shlex.quote(arg) for arg in cmd]))
+    )
 
     def output(is_stream_captured):
-        return subprocess.PIPE if is_stream_captured else \
-            (subprocess.DEVNULL if quiet else None)
+        return subprocess.PIPE if is_stream_captured else (subprocess.DEVNULL if quiet else None)
 
     completed_process = subprocess.run(
-        cmd, cwd=cwd, check=check, input=input,
-        stdout=output(capture_stdout), stderr=output(capture_stderr),
-        env=env, shell=shell)
+        cmd,
+        cwd=cwd,
+        check=check,
+        input=input,
+        stdout=output(capture_stdout),
+        stderr=output(capture_stderr),
+        env=env,
+        shell=shell,
+    )
 
-    _log.debug("Subprocess completed. Return code: {}".format(
-        completed_process.returncode))
+    _log.debug(f"Subprocess completed. Return code: {completed_process.returncode}")
 
     return completed_process

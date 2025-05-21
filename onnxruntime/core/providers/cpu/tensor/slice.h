@@ -16,16 +16,16 @@ class SliceBase {
   // static methods that can be used from other ops if needed
  public:
   // compute output_dims without steps (Slice V1-9 & DynamicSlice)
-  static Status PrepareForCompute(const gsl::span<const int64_t>& raw_starts,
-                                  const gsl::span<const int64_t>& raw_ends,
-                                  const gsl::span<const int64_t>& raw_axes,
+  static Status PrepareForCompute(gsl::span<const int64_t> raw_starts,
+                                  gsl::span<const int64_t> raw_ends,
+                                  gsl::span<const int64_t> raw_axes,
                                   SliceOp::PrepareForComputeMetadata& compute_metadata);
 
   // compute output_dims with steps (Slice V10)
-  static Status PrepareForCompute(const gsl::span<const int64_t>& raw_starts,
-                                  const gsl::span<const int64_t>& raw_ends,
-                                  const gsl::span<const int64_t>& raw_axes,
-                                  const gsl::span<const int64_t>& raw_steps,
+  static Status PrepareForCompute(gsl::span<const int64_t> raw_starts,
+                                  gsl::span<const int64_t> raw_ends,
+                                  gsl::span<const int64_t> raw_axes,
+                                  gsl::span<const int64_t> raw_steps,
                                   SliceOp::PrepareForComputeMetadata& compute_metadata);
 
   // Slice V10 & DynamicSlice
@@ -37,6 +37,10 @@ class SliceBase {
                                      TensorShapeVector& input_ends,
                                      TensorShapeVector& input_axes,
                                      TensorShapeVector& input_steps);
+
+  static Status FlattenOutputDims(gsl::span<const int64_t> input_dimensions, gsl::span<const int64_t> output_dims,
+                                  TensorShapeVector& starts, TensorShapeVector& ends, TensorShapeVector& steps,
+                                  TensorShapeVector*& p_flattened_input_dims, TensorShapeVector*& p_flattened_output_dims);
 
  protected:
   SliceBase(const OpKernelInfo& info, bool dynamic = false)

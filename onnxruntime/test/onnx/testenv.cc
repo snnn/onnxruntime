@@ -12,24 +12,16 @@
 
 using onnxruntime::Status;
 
-static std::unique_ptr<onnxruntime::concurrency::ThreadPool> default_pool;
-static std::once_flag default_pool_init;
-
-PThreadPool TestEnv::GetDefaultThreadPool(onnxruntime::Env& env) {
-  std::call_once(default_pool_init, [&env] {
-    using namespace onnxruntime::concurrency;
-    int core_num = env.GetNumCpuCores();
-
-    onnxruntime::ThreadOptions t_opts;
-    default_pool = std::make_unique<ThreadPool>(&env, t_opts, ORT_TSTR("onnx_runner_tp"), core_num, false);
-  });
-  return default_pool.get();
+std::unique_ptr<OrtThreadPool> TestEnv::CreateThreadPool(onnxruntime::Env& env) {
+  int core_num = env.GetNumPhysicalCpuCores();
+  return std::make_unique<OrtThreadPool>(&env, onnxruntime::ThreadOptions{}, ORT_TSTR("onnx_runner_tp"), core_num, false);
 }
 
 TestEnv::TestEnv(Ort::Env& env, Ort::SessionOptions& so, PThreadPool tp,
-                 std::vector<ITestCase*>&& tests, TestResultStat& stat)
+                 std::vector<ITestCase*>&& tests, TestResultStat& stat, bool inference_mode)
     : env_(env),
       so_(so),
+      inference_mode_(inference_mode),
       tp_(tp),
       tests_(std::move(tests)),
       stat_(stat) {
@@ -42,9 +34,9 @@ TestEnv::~TestEnv() {
 Status TestEnv::Run(size_t parallel_models, int concurrent_runs, size_t repeat_count) {
   std::vector<std::shared_ptr<TestCaseResult>> results;
   if (parallel_models > 1U && tests_.size() > 1U) {
-    results = onnxruntime::test::TestCaseDriver::RunParallel(*this, parallel_models, concurrent_runs);
+    results = onnxruntime::test::TestCaseDriver::RunParallel(*this, parallel_models, concurrent_runs, inference_mode_);
   } else {
-    results = onnxruntime::test::TestCaseDriver::Run(*this, concurrent_runs, repeat_count);
+    results = onnxruntime::test::TestCaseDriver::Run(*this, concurrent_runs, repeat_count, inference_mode_);
   }
 
   CalculateStats(results);

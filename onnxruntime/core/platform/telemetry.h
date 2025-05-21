@@ -16,16 +16,16 @@ using LUID = _LUID;
 namespace onnxruntime {
 
 /**
-  * Configuration information for a session.
-  * An interface used by the onnxruntime implementation to
-  * access operating system functionality for telemetry
-  * 
-  * look at env.h and the Env objection which is the activation factory
-  * for telemetry instances
-  * 
-  * All Telemetry implementations are safe for concurrent access from
-  * multiple threads without any external synchronization.
-  */
+ * Configuration information for a session.
+ * An interface used by the onnxruntime implementation to
+ * access operating system functionality for telemetry
+ *
+ * look at env.h and the Env objection which is the activation factory
+ * for telemetry instances
+ *
+ * All Telemetry implementations are safe for concurrent access from
+ * multiple threads without any external synchronization.
+ */
 class Telemetry {
  public:
   // don't create these, use Env::GetTelemetryProvider() instead
@@ -37,6 +37,14 @@ class Telemetry {
   virtual void EnableTelemetryEvents() const;
   virtual void DisableTelemetryEvents() const;
   virtual void SetLanguageProjection(uint32_t projection) const;
+
+  virtual bool IsEnabled() const;
+
+  // Get the current logging level
+  virtual unsigned char Level() const;
+
+  // Get the current keyword
+  virtual uint64_t Keyword() const;
 
   virtual void LogProcessInfo() const;
 
@@ -52,7 +60,7 @@ class Telemetry {
                                   const std::string& model_graph_name,
                                   const std::unordered_map<std::string, std::string>& model_metadata,
                                   const std::string& loadedFrom, const std::vector<std::string>& execution_provider_ids,
-                                  bool use_fp16) const;
+                                  bool use_fp16, bool captureState) const;
 
   virtual void LogRuntimeError(uint32_t session_id, const common::Status& status, const char* file,
                                const char* function, uint32_t line) const;

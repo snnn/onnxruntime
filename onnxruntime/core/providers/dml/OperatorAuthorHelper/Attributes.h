@@ -9,7 +9,10 @@ namespace AttrName
     static constexpr const char* ActivationAlpha = "activation_alpha";
     static constexpr const char* ActivationBeta = "activation_beta";
     static constexpr const char* Activations = "activations";
+    static constexpr const char* AllowZero = "allowzero";
     static constexpr const char* Alpha = "alpha";
+    static constexpr const char* AlignCorners = "align_corners";
+    static constexpr const char* Antialiased = "antialias";
     static constexpr const char* AutoPad = "auto_pad";
     static constexpr const char* Axes = "axes";
     static constexpr const char* Axis = "axis";
@@ -22,6 +25,7 @@ namespace AttrName
     static constexpr const char* Border = "border";
     static constexpr const char* Broadcast = "broadcast";
     static constexpr const char* CeilMode = "ceil_mode";
+    static constexpr const char* ChannelsLast = "channels_last";
     static constexpr const char* Clip = "clip";
     static constexpr const char* CoordinateTransformationMode = "coordinate_transformation_mode";
     static constexpr const char* CountIncludePad = "count_include_pad";
@@ -31,6 +35,7 @@ namespace AttrName
     static constexpr const char* Dilations = "dilations";
     static constexpr const char* Direction = "direction";
     static constexpr const char* Dtype = "dtype";
+    static constexpr const char* End = "end";
     static constexpr const char* Ends = "ends";
     static constexpr const char* Epsilon = "epsilon";
     static constexpr const char* Equation = "equation";
@@ -47,37 +52,44 @@ namespace AttrName
     static constexpr const char* InputForget = "input_forget";
     static constexpr const char* K = "k";
     static constexpr const char* KeepDims = "keepdims";
-    static constexpr const char* SelectLastIndex = "select_last_index";
     static constexpr const char* KernelShape = "kernel_shape";
     static constexpr const char* LinearBeforeReset = "linear_before_reset";
     static constexpr const char* Lambda = "lambd"; // Deliberate typo to match ONNX spec.
     static constexpr const char* Largest = "largest";
+    static constexpr const char* Layout = "layout";
     static constexpr const char* Low = "low";
     static constexpr const char* Max = "max";
     static constexpr const char* Mean = "mean";
     static constexpr const char* Min = "min";
     static constexpr const char* Mode = "mode";
     static constexpr const char* NearestMode = "nearest_mode";
+    static constexpr const char* NewAxis = "new_axis";
+    static constexpr const char* NoopWithEmptyAxes = "noop_with_empty_axes";
     static constexpr const char* NormalizeVariance = "normalize_variance";
+    static constexpr const char* NumOutputs = "num_outputs";
     static constexpr const char* P = "p";
+    static constexpr const char* PaddingMode = "padding_mode";
     static constexpr const char* OutputHeight = "output_height";
     static constexpr const char* OutputShape = "output_shape";
     static constexpr const char* OutputPadding = "output_padding";
     static constexpr const char* OutputWidth = "output_width";
     static constexpr const char* Pads = "pads";
     static constexpr const char* PooledShape = "pooled_shape";
+    static constexpr const char* Reduction = "reduction";
     static constexpr const char* Reverse = "reverse";
     static constexpr const char* SampleSize = "sample_size";
     static constexpr const char* SamplingRatio = "sampling_ratio";
     static constexpr const char* Scale = "scale";
     static constexpr const char* Scales = "scales";
     static constexpr const char* Seed = "seed";
+    static constexpr const char* SelectLastIndex = "select_last_index";
     static constexpr const char* Shape = "shape";
     static constexpr const char* Size = "size";
     static constexpr const char* Sorted = "sorted";
     static constexpr const char* Spatial = "spatial";
     static constexpr const char* SpatialScale = "spatial_scale";
     static constexpr const char* Split = "split";
+    static constexpr const char* Start = "start";
     static constexpr const char* Starts = "starts";
     static constexpr const char* Steepness = "steepness";
     static constexpr const char* StorageOrder = "storage_order";
@@ -85,10 +97,19 @@ namespace AttrName
     static constexpr const char* Tiles = "tiles";
     static constexpr const char* TimeAxis = "time_axis";
     static constexpr const char* To = "to";
+    static constexpr const char* TrainingMode = "training_mode";
     static constexpr const char* TransA = "transA";
+    static constexpr const char* TransBatchA = "transBatchA";
     static constexpr const char* TransB = "transB";
+    static constexpr const char* TransBatchB = "transBatchB";
+    static constexpr const char* Upper = "upper";
     static constexpr const char* Value = "value";
     static constexpr const char* WidthScale = "width_scale";
+    static constexpr const char* QkvHiddenSizes = "qkv_hidden_sizes";
+    static constexpr const char* Unidirectional = "unidirectional";
+    static constexpr const char* NumHeads = "num_heads";
+    static constexpr const char* KvNumHeads = "kv_num_heads";
+    static constexpr const char* PastPresentShareBuffer = "past_present_share_buffer";
 
     static constexpr const char* FusedActivation = "fused_activation";
     static constexpr const char* FusedActivationDomain = "fused_activation_domain";
@@ -97,6 +118,20 @@ namespace AttrName
     static constexpr const char* FusedBeta = "fused_beta";
     static constexpr const char* FusedGamma = "fused_gamma";
     static constexpr const char* FusedRatio = "fused_ratio";
+    static constexpr const char* MaskFilterValue = "mask_filter_value";
+    static constexpr const char* DoRotary = "do_rotary";
+    static constexpr const char* Activation = "activation";
+    static constexpr const char* Groups = "groups";
+
+    static constexpr const char* GraphFusedActivation = "activation";
+    static constexpr const char* GraphFusedAxis = "activation_axis";
+    static constexpr const char* Interleaved = "interleaved";
+    static constexpr const char* Bits = "bits";
+    static constexpr const char* UppercaseN = "N";
+    static constexpr const char* UppercaseK = "K";
+    static constexpr const char* MatMulNBitsBlockSize = "block_size";
+    static constexpr const char* RotaryEmbeddingDim = "rotary_embedding_dim";
+    static constexpr const char* IsPackedBatching = "is_packed_batching";
 
 } // namespace AttrName
 
@@ -122,8 +157,6 @@ namespace AttrValue
     static constexpr const char* NearestNeighbor = "NN";
     static constexpr const char* NotSet = "NOTSET";
     static constexpr const char* Reflect = "reflect";
-    static constexpr const char* SameLower = "SAME_LOWER";
-    static constexpr const char* SameUpper = "SAME_UPPER";
-    static constexpr const char* Valid = "VALID";
+    static constexpr const char* Wrap = "wrap";
 
 } // namespace AttrValue

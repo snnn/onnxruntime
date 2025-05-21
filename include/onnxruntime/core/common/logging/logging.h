@@ -14,9 +14,10 @@
 #include "core/common/common.h"
 #include "core/common/profiler_common.h"
 #include "core/common/logging/capture.h"
-#include "core/common/logging/severity.h"
-
 #include "core/common/logging/macros.h"
+#include "core/common/logging/severity.h"
+#include "core/common/logging/sink_types.h"
+#include "date/date.h"
 
 /*
 
@@ -50,11 +51,48 @@
 
 */
 
-namespace onnxruntime {
+struct OrtLogger;  // opaque API type. is always an instance of Logger
 
+namespace onnxruntime {
 namespace logging {
 
 using Timestamp = std::chrono::time_point<std::chrono::system_clock>;
+
+// C++20 has operator<< in std::chrono for Timestamp type but mac builds need additional checks
+// to ensure usage is valid.
+// TODO: As we enable C++20 on other platforms we may need similar checks.
+// define a temporary value to determine whether to use the std::chrono or date implementation.
+#define ORT_USE_CXX20_STD_CHRONO __cplusplus >= 202002L
+
+// Apply constraints for mac builds
+#if __APPLE__
+#include <TargetConditionals.h>
+
+// Catalyst check must be first as it has both TARGET_OS_MACCATALYST and TARGET_OS_MAC set
+#if TARGET_OS_MACCATALYST
+// maccatalyst requires version 16.3
+#if (defined(__IPHONE_OS_VERSION_MIN_REQUIRED) && __IPHONE_OS_VERSION_MIN_REQUIRED < 160300)
+#undef ORT_USE_CXX20_STD_CHRONO
+#endif
+
+#elif TARGET_OS_MAC
+// Xcode added support for C++20's std::chrono::operator<< in SDK version 14.4,
+// but the target macOS version must also be >= 13.3 for it to be used.
+#if (defined(__MAC_OS_X_VERSION_MAX_ALLOWED) && __MAC_OS_X_VERSION_MAX_ALLOWED < 140400) || \
+    (defined(__MAC_OS_X_VERSION_MIN_REQUIRED) && __MAC_OS_X_VERSION_MIN_REQUIRED < 130300)
+#undef ORT_USE_CXX20_STD_CHRONO
+#endif
+
+#endif
+#endif  // __APPLE__
+
+#if ORT_USE_CXX20_STD_CHRONO
+namespace timestamp_ns = std::chrono;
+#else
+namespace timestamp_ns = ::date;
+#endif
+
+#undef ORT_USE_CXX20_STD_CHRONO
 
 #ifndef NDEBUG
 ORT_ATTRIBUTE_UNUSED static bool vlog_enabled = true;  // Set directly based on your needs.
@@ -73,6 +111,21 @@ struct Category {
   static const char* onnxruntime;  ///< General output
   static const char* System;       ///< Log output regarding interactions with the host system
   // TODO: What other high level categories are meaningful? Model? Optimizer? Execution?
+};
+
+/// <summary>
+/// ORT TraceLogging keywords for categories of dynamic logging enablement
+/// </summary>
+enum class ORTTraceLoggingKeyword : uint64_t {
+  Session = 0x1,    // ORT Session TraceLoggingWrite
+  Logs = 0x2,       // LOGS() Macro ORT logs. Pair with an appropriate level depending on detail required
+  Reserved1 = 0x4,  // Reserved if we want to add some specific sub-categories instead of just LOGS() or other uses
+  Reserved2 = 0x8,
+  Reserved3 = 0x10,
+  Reserved4 = 0x20,
+  Reserved5 = 0x40,
+  Reserved6 = 0x80,
+  Profiling = 0x100  // Enables profiling. At higher levels >5 can impact inference performance
 };
 
 class ISink;
@@ -137,10 +190,40 @@ class LoggingManager final {
   static const Logger& DefaultLogger();
 
   /**
+    Return a boolean indicating if the default logger has been initialized
+  */
+  static bool HasDefaultLogger() { return nullptr != s_default_logger_; }
+
+  /**
+    Gets the default instance of the LoggingManager.
+  */
+  static LoggingManager* GetDefaultInstance();
+
+  /**
+     Removes a Sink if one is present
+  */
+  void RemoveSink(SinkType sinkType);
+
+  /**
+     Adds a Sink to the current sink creating a CompositeSink if necessary
+     Sinks types must be unique
+     @param severity The severity level for the new Sink
+  */
+  bool AddSinkOfType(SinkType sinkType, std::function<std::unique_ptr<ISink>()> sinkFactory, logging::Severity severity);
+
+  /**
      Change the minimum severity level for log messages to be output by the default logger.
      @param severity The severity.
   */
   static void SetDefaultLoggerSeverity(Severity severity);
+
+  /**
+     Change the maximum verbosity level for log messages to be output by the default logger.
+     @remarks
+     To activate the verbose log, the logger severity must also be set to kVERBOSE.
+     @param vlog_level The verbosity level.
+  */
+  static void SetDefaultLoggerVerbosity(int vlog_level);
 
   /**
      Logs a FATAL level message and creates an exception that can be thrown with error information.
@@ -175,7 +258,10 @@ class LoggingManager final {
   void CreateDefaultLogger(const std::string& logger_id);
 
   std::unique_ptr<ISink> sink_;
-  const Severity default_min_severity_;
+#ifdef _WIN32
+  mutable std::mutex sink_mutex_;
+#endif
+  Severity default_min_severity_;
   const bool default_filter_user_data_;
   const int default_max_vlog_level_;
   bool owns_default_logger_;
@@ -211,7 +297,7 @@ class Logger {
         id_{id},
         min_severity_{severity},
         filter_user_data_{filter_user_data},
-        max_vlog_level_{severity > Severity::kVERBOSE ? -1 : vlog_level} {  // disable unless logging VLOG messages
+        max_vlog_level_{vlog_level} {
   }
 
   /**
@@ -227,6 +313,14 @@ class Logger {
   void SetSeverity(Severity severity) noexcept { min_severity_ = severity; }
 
   /**
+     Change the maximum verbosity level for log messages to be output.
+     @remarks
+     To activate the verbose log, the logger severity must also be set to kVERBOSE.
+     @param vlog_level The verbosity.
+  */
+  void SetVerbosity(int vlog_level) noexcept { max_vlog_level_ = vlog_level; }
+
+  /**
      Check if output is enabled for the provided LogSeverity and DataType values.
      @param severity The severity.
      @param data_type Type of the data.
@@ -237,10 +331,10 @@ class Logger {
   }
 
   /**
-     Return the maximum VLOG level allowed.
+     Return the maximum VLOG level allowed. Disabled unless logging VLOG messages
   */
   int VLOGMaxLevel() const noexcept {
-    return max_vlog_level_;
+    return min_severity_ > Severity::kVERBOSE ? -1 : max_vlog_level_;
   }
 
   /**
@@ -259,12 +353,16 @@ class Logger {
     logging_manager_->SendProfileEvent(eventRecord);
   }
 
+  // convert to API type for custom ops and plugin EPs
+  OrtLogger* ToExternal() { return reinterpret_cast<OrtLogger*>(this); }
+  const OrtLogger* ToExternal() const { return reinterpret_cast<const OrtLogger*>(this); }
+
  private:
   const LoggingManager* logging_manager_;
   const std::string id_;
   Severity min_severity_;
   const bool filter_user_data_;
-  const int max_vlog_level_;
+  int max_vlog_level_;
 };
 
 inline const Logger& LoggingManager::DefaultLogger() {
@@ -285,6 +383,15 @@ inline void LoggingManager::SetDefaultLoggerSeverity(Severity severity) {
   s_default_logger_->SetSeverity(severity);
 }
 
+inline void LoggingManager::SetDefaultLoggerVerbosity(int vlog_level) {
+  if (s_default_logger_ == nullptr) {
+    // fail early for attempted misuse. don't use logging macros as we have no logger.
+    ORT_THROW("Attempt to use DefaultLogger but none has been registered.");
+  }
+
+  s_default_logger_->SetVerbosity(vlog_level);
+}
+
 inline Timestamp LoggingManager::GetTimestamp() const noexcept {
   static const Epochs& epochs = GetEpochs();
 
@@ -302,6 +409,18 @@ unsigned int GetThreadId();
    Return the current process id.
 */
 unsigned int GetProcessId();
+
+/**
+   If the ONNXRuntimeTraceLoggingProvider ETW Provider is enabled, then adds to the existing logger.
+*/
+std::unique_ptr<ISink> EnhanceSinkWithEtw(std::unique_ptr<ISink> existingSink, logging::Severity originalSeverity,
+                                          logging::Severity etwSeverity);
+
+/**
+  If the ONNXRuntimeTraceLoggingProvider ETW Provider is enabled, then can override the logging level.
+  But this overrided level only applies to the ETW sink. The original logger(s) retain their original logging level
+*/
+Severity OverrideLevelWithEtw(Severity originalSeverity);
 
 }  // namespace logging
 }  // namespace onnxruntime

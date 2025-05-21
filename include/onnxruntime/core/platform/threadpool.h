@@ -127,7 +127,6 @@ struct TensorOpCost {
   double compute_cycles;
 };
 
-
 namespace concurrency {
 
 template <typename Environment>
@@ -157,7 +156,8 @@ class ThreadPool {
              const ThreadOptions& thread_options,
              const NAME_CHAR_TYPE* name,
              int degree_of_parallelism,
-             bool low_latency_hint);
+             bool low_latency_hint,
+             bool force_hybrid = false);
 
   // Waits until all scheduled work has finished and then destroy the
   // set of threads.
@@ -196,11 +196,11 @@ class ThreadPool {
   // parallel loops.
 
   class ParallelSection {
-  public:
-    explicit ParallelSection(ThreadPool *tp);
+   public:
+    explicit ParallelSection(ThreadPool* tp);
     ~ParallelSection();
 
-  private:
+   private:
     friend class ThreadPool;
 
     // Owning reference for the underlying ThreadPoolParallelSection
@@ -208,17 +208,18 @@ class ThreadPool {
     // deleter here so that the definition of
     // ThreadPoolParallelSection does not need to be available at this
     // point to avoid a dependence on the Eigen headers.
-    std::unique_ptr<ThreadPoolParallelSection, void(*)(ThreadPoolParallelSection*)>
-      ps_{nullptr, [](ThreadPoolParallelSection*){}};
-    ThreadPool *tp_;
+    ThreadPoolParallelSection* ps_{nullptr};
+    ThreadPool* tp_;
     ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(ParallelSection);
-
-    // Non-owning reference to the current thread's paralel section
-    // (or nullptr outside parallel sections).
-    static thread_local ParallelSection *current_parallel_section;
-    static_assert(std::is_trivially_destructible<decltype(current_parallel_section)>::value,
-                  "Per-thread state should be trivially destructible");
   };
+
+  // The below API allows to disable spinning
+  // This is used to support real-time scenarios where
+  // spinning between relatively infrequent requests
+  // contributes to high CPU usage while not processing anything.
+  void EnableSpinning();
+
+  void DisableSpinning();
 
   // Schedules fn() for execution in the pool of threads.  The function may run
   // synchronously if it cannot be enqueued.  This will occur if the thread pool's
@@ -424,6 +425,9 @@ class ThreadPool {
 
   // If used, underlying_threadpool_ is instantiated and owned by the ThreadPool.
   std::unique_ptr<ThreadPoolTempl<Env> > extended_eigen_threadpool_;
+
+  // Force the thread pool to run in hybrid mode on a normal cpu.
+  bool force_hybrid_ = false;
 };
 
 }  // namespace concurrency

@@ -26,7 +26,9 @@ namespace cuda {
   BINARY_OP_NAME_EXPR(Xor, (a ^ b))                  \
   BINARY_OP_NAME_EXPR(PRelu, (a > (T)0 ? a : a * b)) \
   BINARY_OP_NAME_EXPR(Max, _Max(a, b))               \
-  BINARY_OP_NAME_EXPR(Min, _Min(a, b))
+  BINARY_OP_NAME_EXPR(Min, _Min(a, b))               \
+  BINARY_OP_NAME_EXPR(Mod, _Mod(a, b))               \
+  BINARY_OP_NAME_EXPR(Fmod, _Fmod(a, b))
 
 // NOTE that cu files are compiled with nvcc and should not refer to any onnxruntime headers
 // so struct BinaryElementwisePreparation cannot be used here
@@ -82,13 +84,12 @@ BINARY_ELEMENTWISE_IMPL_DECLARATION_T1(Pow);
       T* output_data,                                \
       size_t count)
 
-#define BINARY_OPS2()                    \
-  BINARY_OP_NAME_EXPR2(Greater, (a > b)) \
-  BINARY_OP_NAME_EXPR2(Equal, (a == b))  \
-  BINARY_OP_NAME_EXPR2(Less, (a < b)) \
+#define BINARY_OPS2()                            \
+  BINARY_OP_NAME_EXPR2(Greater, (a > b))         \
+  BINARY_OP_NAME_EXPR2(Equal, (a == b))          \
+  BINARY_OP_NAME_EXPR2(Less, (a < b))            \
   BINARY_OP_NAME_EXPR2(GreaterOrEqual, (a >= b)) \
   BINARY_OP_NAME_EXPR2(LessOrEqual, (a <= b))
-
 
 #define BINARY_OP_NAME_EXPR2(name, expr) BINARY_ELEMENTWISE_IMPL_DECLARATION_T2(name);
 BINARY_OPS2()

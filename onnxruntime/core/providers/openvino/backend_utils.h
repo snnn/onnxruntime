@@ -1,15 +1,20 @@
-// Copyright(C) 2019 Intel Corporation
+// Copyright (C) Intel Corporation
 // Licensed under the MIT License
 
 #pragma once
 
-#include <inference_engine.hpp>
-
 #define ORT_API_MANUAL_INIT
-#include "core/session/onnxruntime_cxx_api.h"
-#include "contexts.h"
 #include <iomanip>
+#include <unordered_map>
+#include <map>
+#include <memory>
+#include <vector>
+#include <string>
+#include <string_view>
 
+#include "core/session/onnxruntime_cxx_api.h"
+#include "core/providers/openvino/contexts.h"
+#include "core/providers/openvino/ov_interface.h"
 #ifdef _WIN32
 #include <direct.h>
 #define GetCurrentDir _getcwd
@@ -25,68 +30,51 @@ namespace openvino_ep {
 namespace backend_utils {
 const std::string log_tag = "[OpenVINO-EP] ";
 
-#ifndef NDEBUG
 bool IsDebugEnabled();
-#endif
 
-//Internal diagnostic function. 
+// Internal diagnostic function.
 bool IsCILogEnabled();
 
-bool UseCompiledNetwork();
+int GetFirstAvailableDevice(SessionContext& session_context);
 
-std::string GetCurrentWorkingDir();
-
-bool IsDirExists(const std::string& pathname);
-
-void CreateDirectory(const std::string& ov_compiled_blobs_dir);
-
-void SetIODefs(const ONNX_NAMESPACE::ModelProto& model_proto,
-               std::shared_ptr<InferenceEngine::CNNNetwork> network,
-               std::unordered_map<std::string, int> output_names,
-               std::map<std::string, std::shared_ptr<ngraph::Node>>& const_outputs_map,
-               std::string device);
-
-std::shared_ptr<InferenceEngine::CNNNetwork>
-CreateCNNNetwork(const ONNX_NAMESPACE::ModelProto& model_proto, const GlobalContext& global_context, const SubGraphContext& subgraph_context, std::map<std::string, std::shared_ptr<ngraph::Node>>& const_outputs_map);
-
-int GetFirstAvailableDevice(GlobalContext& global_context);
-
-void FillOutputsWithConstantData(Ort::CustomOpApi& ort, std::shared_ptr<ngraph::Node> node, OrtValue* out_tensor);
+void FillOutputsWithConstantData(std::shared_ptr<ov::Node> node, Ort::UnownedValue& out_tensor);
 
 template <typename T>
-void FillOutputHelper(Ort::CustomOpApi& ort, OrtValue* out_tensor, std::shared_ptr<ngraph::Node> node);
+void FillOutputHelper(Ort::UnownedValue& out_tensor, std::shared_ptr<ov::Node> node);
 
-OrtValue*
-GetOutputTensor(Ort::CustomOpApi& ort, OrtKernelContext* context,
+Ort::UnownedValue
+GetOutputTensor(Ort::KernelContext& context,
                 std::string output_name,
-                std::unordered_map<std::string, int> output_names,
-                std::shared_ptr<ngraph::Node> node);
+                const SubGraphContext::string_index_map_t& output_names,
+                std::shared_ptr<ov::Node> node);
 
-InferenceEngine::Precision
-ConvertPrecisionONNXToOpenVINO(const ONNX_NAMESPACE::TypeProto& onnx_type, std::string device);
-
-OrtValue*
-GetOutputTensor(Ort::CustomOpApi& ort, OrtKernelContext* context, size_t batch_size,
-                InferenceEngine::InferRequest::Ptr infer_request,
+Ort::UnownedValue
+GetOutputTensor(Ort::KernelContext& context, size_t batch_size,
+                OVInferRequestPtr infer_request,
                 std::string output_name,
-                std::unordered_map<std::string, int> output_names);
+                const SubGraphContext::string_index_map_t& output_names);
 
-void FillInputBlob(InferenceEngine::Blob::Ptr& inputBlob, size_t batch_slice_idx,
-                   std::string input_name, Ort::CustomOpApi& ort, OrtKernelContext* context,
-                   InferenceEngine::Precision precision, const SubGraphContext& subgraph_context);
+void FillInputBlob(OVTensorPtr inputBlob, size_t batch_slice_idx,
+                   std::string input_name, Ort::KernelContext& context,
+                   const SubGraphContext& subgraph_context);
 
-void FillOutputBlob(InferenceEngine::Blob::Ptr& outputBlob, OrtValue* output_tensor,
-                    Ort::CustomOpApi& ort, InferenceEngine::Precision precision, size_t batch_slice_idx);
+void FillOutputBlob(OVTensorPtr outputBlob, Ort::UnownedValue& output_tensor,
+                    size_t batch_slice_idx);
 
-std::vector<std::pair<std::string, InferenceEngine::InferenceEngineProfileInfo>>
-perfCountersSorted(std::map<std::string, InferenceEngine::InferenceEngineProfileInfo> perfMap);
+std::shared_ptr<const OVNetwork>
+CreateOVModel(std::string&& model,
+              const SessionContext& session_context,
+              std::map<std::string, std::shared_ptr<ov::Node>>& const_outputs_map);
 
-void printPerformanceCounts(const std::map<std::string, InferenceEngine::InferenceEngineProfileInfo>& performanceMap,
+void CreateOVTensors(const std::string& device_name,
+                     SharedContext::SharedWeights::Metadata::Map& metadata_map,
+                     SharedContext::SharedWeights::WeightsFile& weights);
+void DestroyOVTensors(SharedContext::SharedWeights::Metadata::Map& metadata_map);
+
+void printPerformanceCounts(const std::vector<OVProfilingInfo>& performanceMap,
                             std::ostream& stream, std::string deviceName);
 
-void printPerformanceCounts(InferenceEngine::InferRequest::Ptr request, std::ostream& stream, std::string deviceName);
-
-void printPerformanceCounts(InferenceEngine::InferRequest request, std::ostream& stream, std::string deviceName);
+void printPerformanceCounts(OVInferRequestPtr request, std::ostream& stream, std::string deviceName);
 
 }  // namespace backend_utils
 }  // namespace openvino_ep

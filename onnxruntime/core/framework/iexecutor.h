@@ -20,7 +20,7 @@ class Logger;
 
 class IExecutor {
  public:
-  using CustomAllocator = std::function<Status(const TensorShape&, const OrtMemoryInfo&, OrtValue&, bool& allocated)>;
+  using CustomAllocator = std::function<Status(const TensorShape&, const OrtDevice&, OrtValue&, bool& allocated)>;
 
   virtual ~IExecutor() = default;
 
@@ -28,9 +28,9 @@ class IExecutor {
    * The lifetime of 'fetches' is limited by 'session_state'
    */
   common::Status Execute(const SessionState& session_state,
-                         const std::vector<int>& feed_mlvalue_idxs,
-                         const std::vector<OrtValue>& feeds,
-                         const std::vector<int>& fetch_mlvalue_idxs,
+                         gsl::span<const int> feed_mlvalue_idxs,
+                         gsl::span<const OrtValue> feeds,
+                         gsl::span<const int> fetch_mlvalue_idxs,
                          std::vector<OrtValue>& fetches,
                          const logging::Logger& logger) {
     std::unordered_map<size_t, CustomAllocator> fetch_allocators;
@@ -38,8 +38,8 @@ class IExecutor {
   }
 
   // TODO: as fetch_allocators is optional, it should be a pointer instead of reference
-  virtual common::Status Execute(const SessionState& session_state, const std::vector<int>& feed_mlvalue_idxs,
-                                 const std::vector<OrtValue>& feeds, const std::vector<int>& fetch_mlvalue_idxs,
+  virtual common::Status Execute(const SessionState& session_state, gsl::span<const int> feed_mlvalue_idxs,
+                                 gsl::span<const OrtValue> feeds, gsl::span<const int> fetch_mlvalue_idxs,
                                  std::vector<OrtValue>& fetches,
                                  // optional custom allocators. key is index in fetches
                                  const std::unordered_map<size_t, CustomAllocator>& fetch_allocators,

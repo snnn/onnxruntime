@@ -1,54 +1,50 @@
 parameters:
 
-- name: BuildORT
-  displayName: Build ORT
-  type: boolean
-  default: true
-
 - name: PostToDashboard
-  displayName: Post to Dashboard
-  type: boolean
-  default: true
-
-- name: RunNvidiaContainer
-  displayName: Run in Nvidia Container (or set trtContainer Variable)
-  type: boolean
-  default: true
-
-- name: RunDocker
-  displayName: Run on Docker
+  displayName: Post EP Perf results to Dashboard
   type: boolean
   default: true
 
 - name: TrtVersion
   displayName: TensorRT Version
   type: string
-  default: 8.2.1.8
+  default: 10.9_cuda12.8_cudnn9
   values:
-  - 8.2.1.8
-  - 8.0.1.6
-  - 7.2.3.4
+  - 10.9_cuda12.8_cudnn9
+  - BIN
 
-- name: ConfigureEPs
-  displayName: Configure EPs (set epList variable - separate by spaces)
-  type: boolean
-  default: false
-
-- name: PublishWheel
-  displayName: Publish Wheel 
+- name: UseTensorrtOssParser
+  displayName: Use TensorRT-OSS Parser (not compatible with BIN)
   type: boolean
   default: false
 
 - name: ModelGroups
   type: object
-  default: 
+  default:
     - "onnx-zoo-models"
     - "partner-models"
 
 - name: MemTest
-  displayName: Run Memory Test
+  displayName: Run Memory and Concurrency Test
   type: boolean
-  default: false
+  default: true
+
+- name: ConcurrencyTest
+  displayName: Specifies the number of concurrency model test to invoke simultaneously
+  type: string
+  default: 2
+
+- name: TrtEPOptions
+  displayName: TensorRT EP options
+  type: object
+  default:
+    - trt_max_workspace_size=4294967296
+    - trt_engine_cache_enable=True
+
+- name: CUDAEPOptions
+  displayName: CUDA EP options
+  type: object
+  default: []
 
 jobs:
 - job: 'Onnxruntime_Linux_GPU_TensorRT_Perf'
@@ -56,92 +52,84 @@ jobs:
     clean: all
   timeoutInMinutes: 3000
   pool: 'Onnxruntime-Linux-GPU-TensorRT-Perf'
-  
+
   variables:
-    - name: trt_dockerfile
-      ${{ if eq(parameters.TrtVersion, '8.2.1.8') }}:
-        value: Dockerfile.ubuntu_cuda11_4_tensorrt8_2
-      ${{ if eq(parameters.TrtVersion, '8.0.1.6') }}:
-        value: Dockerfile.ubuntu_cuda11_4_tensorrt8_0
-      ${{ if eq(parameters.TrtVersion, '7.2.3.4') }}:
-        value: Dockerfile.ubuntu_cuda11_4_tensorrt7_2
-    
-    - name: trtContainer
-      ${{ if eq(parameters.TrtVersion, '8.2.1.8') }}:
-        value: 21.12
-      ${{ if eq(parameters.TrtVersion, '8.0.1.6') }}:
-        value: 21.07
-      ${{ if eq(parameters.TrtVersion, '7.2.3.4') }}:
-        value: 20.12
-        
-    - name: anubis_image
-      value: ort-master-py38
+    - name: branchName
+      ${{ if not(eq(variables['ortBranchOverride'], '')) }}:
+        value: $(ortBranchOverride)
+      ${{ else }}:
+        value: $[ replace(variables['Build.SourceBranch'], 'refs/heads/', '') ]
 
-    - name: build_args
-      ${{ if eq(parameters.RunNvidiaContainer, true) }}:
-        value: Dockerfile.tensorrt-perf -t $(trtContainer) -v ${{parameters.TrtVersion}} -o $(Build.SourcesDirectory)/dockerfiles/Dockerfile.tensorrt
-      ${{ if ne(parameters.RunNvidiaContainer, true) }}:
-        value: Dockerfile.custom-trt-perf -t ${{ parameters.TrtVersion }} -o $(Build.SourcesDirectory)/tools/ci_build/github/linux/docker/$(trt_dockerfile)
+    - name: trtVersion
+      ${{ if eq(parameters.TrtVersion, 'BIN') }}:
+        value: $(tarTrtVersion)
+      ${{ else }}:
+        value: ${{ parameters.TrtVersion }}
 
-    - name: environment
-      ${{ if eq(parameters.RunDocker, true) }}:
-        value: docker.sh -d ort-$(branch) -p $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf -v $(modelVolume)
-      ${{ if ne(parameters.RunDocker, true) }}:
-        value: machine.sh
-        
-    - name: with_arguments
-      value: $(environment) -e "$(epList)"
+    - name: trtEPOptionsArg
+      ${{ if not(eq(length(parameters.TrtEPOptions), 0)) }}:
+        value: --trt_ep_options ${{ join(',',parameters.TrtEPOptions) }}
+
+    - name: cudaEPOptionsArg
+      ${{ if not(eq(length(parameters.CUDAEPOptions), 0)) }}:
+        value: --cuda_ep_options ${{ join(',',parameters.CUDAEPOptions) }}
+
+    - name: optional_arguments
+      value: -a "-a -z -g $(optimizeGraph) -b $(bindInputs) $(trtEPOptionsArg) $(cudaEPOptionsArg)"
+
+    - name: image
+      value: ort-image-$(Build.BuildId)
+
+    - name: parser
+      ${{ if eq(parameters.UseTensorrtOssParser, true) }}:
+        value: --use_tensorrt_oss_parser $(parameters.UseTensorrtOssParser)
 
   steps:
+    - ${{ if and(eq(parameters.TrtVersion, 'BIN'), eq(parameters.UseTensorrtOssParser, false)) }}:
+      - script: 'ls -al $(trtBinsDir)'
+        displayName: 'Show available TensorRT .tar.gz packages'
 
-    - ${{ if eq(parameters.BuildORT, true) }}:
+      - script: 'cp $(trtBinsDir)/TensorRT-$(trtVersion).Linux.x86_64-gnu.cuda-$(tarCudaVersion).tar.gz $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build/'
+        displayName: 'Copy TensorRT .tar.gz package into Docker build directory'
 
-      - ${{ if eq(parameters.RunDocker, true) }}: 
-        - script: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build/build_image.sh -p $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build/$(build_args) -b $(branch) -i ort-$(branch) -c 75'
-          displayName: 'Build latest ORT Image'
-          workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build'
-
-      - ${{ if ne(parameters.RunDocker, true) }}:
-        - script: 'python3 $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build/ort_build_latest.py -b $(branch) -c /usr/local/cuda -o ~/repos/onnxruntime/ -t ${{ parameters.TrtVersion }}'
-          displayName: 'Build latest ORT'
-          workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build'
-
-    - ${{ if eq(parameters.PublishWheel, true) }}:
-      
-      - script: 'docker build --build-arg IMAGE=ort-master -t $(anubis_image) -f $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build/Dockerfile.python38 .'
-        displayName: 'Build Python 3.8 Images'
+      - script: 'python3 $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build/build_image.py -r $(Build.SourcesDirectory) -i $(image) -b $(branchName) -t $(trtVersion) -a 75 --install_bin --tar_cuda_version=$(tarCudaVersion) --trt_bins_dir=.'
+        displayName: 'Install TensorRT $(tarTrtVersion) from binaries and build latest ORT Image'
         workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build'
 
-      - script: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/anubis/copy_wheel.sh -t $(trtContainer) -i $(anubis_image)'
-        displayName: 'Copy Wheel from Docker'
-        workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/anubis'
-    
-      - script: 'OUTPUT=$(ls dist) && az storage blob upload --account-name anubiscustomerstorage  --account-key $(account-key) --container-name upload --file $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/dist/*.whl --name ort-trt-ep/$(Build.BuildNumber)/$OUTPUT'
-        displayName: 'Upload Wheel File'
-        workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/'
+    # Build ORT with TensorRT built-in parser
+    - ${{ if and(ne(parameters.TrtVersion, 'BIN'), eq(parameters.UseTensorrtOssParser, false)) }}:
+      - script: 'python3 $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build/build_image.py -r $(Build.SourcesDirectory) -i $(image) -b $(branchName) -t $(trtVersion) -a 75'
+        displayName: 'Build latest ORT Image with TensorRT built-in parser'
+        workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build'
 
-      - task: PowerShell@2
-        inputs:
-          filePath: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/anubis/start_job.ps1'
-          arguments: '-file_folder $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/dist -account_key $(account-key) -trt_container $(trtContainer) -csc $(csc)'
-        displayName: 'Start Anubis Job'
+    # Build ORT with certain version of TensorRT OSS parser
+    - ${{ if and(ne(parameters.TrtVersion, 'BIN'), eq(parameters.UseTensorrtOssParser, true), ne(variables.onnxTensorrtCommitId, '')) }}:
+      - script: 'python3 $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build/build_image.py -r $(Build.SourcesDirectory) -i $(image) -b $(branchName) -t $(trtVersion) -a 75 -o $(onnxTensorrtCommitId) --use_tensorrt_oss_parser'
+        displayName: 'Build latest ORT Image with TensorRT OSS parser and commit id $(onnxTensorrtCommitId)'
+        workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build'
 
-    - ${{ each option in parameters.ModelGroups }}:
-      - script: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/run_perf_$(with_arguments) -o ${{option}} -m $(${{option}})'
-        displayName: '${{option}} perf'
-        workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/'
-        
+    # Build ORT with default version of TensorRT OSS parser
+    - ${{ if and(ne(parameters.TrtVersion, 'BIN'), eq(parameters.UseTensorrtOssParser, true), eq(variables.onnxTensorrtCommitId, '')) }}:
+      - script: 'python3 $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build/build_image.py -r $(Build.SourcesDirectory) -i $(image) -b $(branchName) -t $(trtVersion) -a 75 --use_tensorrt_oss_parser'
+        displayName: 'Build latest ORT Image with TensorRT OSS parser'
+        workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/build'
+
     - ${{ if eq(parameters.MemTest, true) }}:
-      - script: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/mem_test/run_mem_test_docker.sh -d ort-$(branch) -p $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/mem_test/ -w /code/ -l false'
-        displayName: 'Run Memory Test'
+      - script: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/mem_test/run_mem_test_docker.sh -d $(image) -p $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/mem_test/ -w /code/ -l false -c ${{ parameters.ConcurrencyTest }}'
+        displayName: 'Run Memory Test and Concurrency Test'
         workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/mem_test/'
 
-    # Prepare and Publish Artifacts 
-    
+    - ${{ each option in parameters.ModelGroups }}:
+      - script: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/run_perf_docker.sh -d $(image) -p $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf -v $(modelVolume) -b true -o ${{option}} -m $(${{option}}) -e "$(epList)" $(optional_arguments)'
+        displayName: '${{option}} perf'
+        workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/'
+
+    # Prepare and Publish Artifacts
+
     - script: 'mkdir $(Build.SourcesDirectory)/Artifact'
       displayName: 'Prepare Artifacts Directory'
       workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/'
-      condition: always() 
+      condition: always()
 
     - ${{ if not(eq(length(parameters.ModelGroups), 0)) }}:
       - script: 'cp -r $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/result/ $(Build.SourcesDirectory)/Artifact'
@@ -154,15 +142,38 @@ jobs:
         workingDirectory: '$(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/'
         condition: always()
 
-    - task: PublishBuildArtifacts@1
-      inputs:
-        pathtoPublish: '$(Build.SourcesDirectory)/Artifact'
-        artifactName: 'result-$(Build.BuildNumber)'
-        
+      - script: 'python3 -m pip install pandas azure-kusto-data[pandas] azure-kusto-ingest[pandas] coloredlogs'
+        displayName: 'Install dashboard dependencies'
+
+      - script: |
+          az --version || {
+              echo "Azure CLI not found, installing..."
+              curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          }
+        displayName: 'Check and Install Azure CLI'
+
+      - task: AzureCLI@2
+        displayName: 'Parse Memory & Concurrency Test Records and Sync'
+        inputs:
+          azureSubscription: AIInfraBuildOnnxRuntimeOSS
+          scriptLocation: inlineScript
+          scriptType: bash
+          inlineScript: |
+            short_hash=$(git rev-parse --short HEAD) &&
+            commit_date=$(git log -1 --date=iso-strict --pretty=format:%cd) &&
+            python3 $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/parse_mem_concurrency_test.py -r $(Build.SourcesDirectory)/Artifact/result_mem_test -c $short_hash -d $commit_date -u "$(reportUrl)?buildId=$(Build.BuildId)" -t $(trtVersion) -b $(branchName) --kusto_conn $(kustoConn) --database $(database) $(parser)
+
     - ${{ if eq(parameters.PostToDashboard, true) }}:
 
       - script: 'python3 -m pip install pandas azure-kusto-data[pandas] azure-kusto-ingest[pandas] coloredlogs'
         displayName: 'Install dashboard dependencies'
+
+      - script: |
+          az --version || {
+              echo "Azure CLI not found, installing..."
+              curl -sL https://aka.ms/InstallAzureCLIDeb | sudo bash
+          }
+        displayName: 'Check and Install Azure CLI'
 
       - task: AzureCLI@2
         displayName: 'Azure CLI Post to Dashboard'
@@ -171,12 +182,13 @@ jobs:
           scriptLocation: inlineScript
           scriptType: bash
           inlineScript: |
-            short_hash=$(git rev-parse --short HEAD^) && 
-            python3 $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/post.py -r $(Build.SourcesDirectory)/Artifact/result -c $short_hash -u "$(reportUrl)?buildId=$(Build.BuildId)" -t ${{ parameters.TrtVersion }} -b $(branch)
-    
-    
-    - template: templates/component-governance-component-detection-steps.yml
-      parameters :
-        condition : 'succeeded'
-        
+            short_hash=$(git rev-parse --short HEAD) &&
+            commit_date=$(git log -1 --date=iso-strict --pretty=format:%cd) &&
+            python3 $(Build.SourcesDirectory)/onnxruntime/python/tools/tensorrt/perf/post.py -r $(Build.SourcesDirectory)/Artifact/result -c $short_hash -d $commit_date -u "$(reportUrl)?buildId=$(Build.BuildId)" -t $(trtVersion) -b $(branchName) --kusto_conn $(kustoConn) --database $(database) $(parser)
+
+    - task: PublishBuildArtifacts@1
+      inputs:
+        pathtoPublish: '$(Build.SourcesDirectory)/Artifact'
+        artifactName: 'result-$(Build.BuildNumber)'
+
     - template: templates/clean-agent-build-directory-step.yml

@@ -1,10 +1,12 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Copyright (c) 2019, NXP Semiconductor, Inc. All rights reserved.
+// SPDX-FileCopyrightText: Copyright 2024 Arm Limited and/or its affiliates <open-source-office@arm.com>
 // Licensed under the MIT License.
 
 #include <cmath>
 
 #include "core/common/common.h"
+#include "core/common/inlined_containers.h"
 #include "core/framework/op_kernel.h"
 #include "core/util/math.h"
 #include "core/util/math_cpuonly.h"
@@ -29,17 +31,16 @@ thread_local std::map<OpKernel*, ACLNEPool> MaxPoolV8<T>::maxPoolLayers;
 
 template <typename T>
 ACLNEPool PoolOperation(onnxruntime::OpKernelContext* context,
-                     arm_compute::PoolingType pool_type,
-                     onnxruntime::PoolAttributes pool_attrs,
-                     PoolLayersIterator it,
-                     bool insert){
-
+                        arm_compute::PoolingType pool_type,
+                        onnxruntime::PoolAttributes pool_attrs,
+                        PoolLayersIterator it,
+                        bool insert) {
   const Tensor* X = context->Input<Tensor>(0);
   const TensorShape& x_shape = X->Shape();
 
-  std::vector<int64_t> pads = pool_attrs.pads;
-  std::vector<int64_t> strides = pool_attrs.strides;
-  std::vector<int64_t> kernel_shape = pool_attrs.kernel_shape;
+  auto pads = pool_attrs.pads;
+  auto strides = pool_attrs.strides;
+  auto kernel_shape = pool_attrs.kernel_shape;
 
   if (pool_attrs.global_pooling) {
     const auto& input_dims = x_shape.GetDims();
@@ -47,7 +48,7 @@ ACLNEPool PoolOperation(onnxruntime::OpKernelContext* context,
     pads.assign(kernel_shape.size(), 0);
   }
 
-  std::vector<int64_t> output_dims = pool_attrs.SetOutputSize(x_shape, x_shape[1], &pads);
+  const auto& output_dims = pool_attrs.SetOutputSize(x_shape, x_shape[1], &pads);
   Tensor* Y = context->Output(0, TensorShape(output_dims));
 
   ACLNEPool tpool;
@@ -61,14 +62,16 @@ ACLNEPool PoolOperation(onnxruntime::OpKernelContext* context,
     tpool.out->allocator()->init(arm_compute::TensorInfo(ACLTensorShape(Y->Shape(), PREF_DIM), arm_compute::Format::F32));
 
     if (pool_attrs.global_pooling) {
-      layer->configure(tpool.in.get(), tpool.out.get(), arm_compute::PoolingLayerInfo(pool_type));
+      layer->configure(tpool.in.get(),
+                       tpool.out.get(),
+                       arm_compute::PoolingLayerInfo(pool_type, arm_compute::DataLayout::NCHW));
     } else {
-      std::vector<int64_t> aclStrides(2);
+      TensorShapeVector aclStrides(2);
       aclStrides[0] = (strides.size() == 2) ? strides[1] : 1;
       aclStrides[1] = strides[0];
 
-      std::vector<int64_t> aclPads(4);
-    // The pad order in acl is: pad_left, pad_right, pad_top, pad_bottom
+      InlinedVector<int64_t> aclPads(4);
+      // The pad order in acl is: pad_left, pad_right, pad_top, pad_bottom
       if (pads.size() == 2) {
         if (strides.size() == 1) {
           aclPads[0] = 0;
@@ -88,10 +91,13 @@ ACLNEPool PoolOperation(onnxruntime::OpKernelContext* context,
         aclPads[3] = pads[2];
       }
 
-      arm_compute::PadStrideInfo aclPadStride = arm_compute::PadStrideInfo(aclStrides[0], aclStrides[1],
-                                                                           aclPads[0], aclPads[1], aclPads[2], aclPads[3], arm_compute::DimensionRoundingType::FLOOR);
+      arm_compute::PadStrideInfo aclPadStride = arm_compute::PadStrideInfo(
+          (unsigned int)aclStrides[0], (unsigned int)aclStrides[1],
+          (unsigned int)aclPads[0], (unsigned int)aclPads[1],
+          (unsigned int)aclPads[2], (unsigned int)aclPads[3],
+          arm_compute::DimensionRoundingType::FLOOR);
 
-      std::vector<int64_t> aclKernelShape(2);
+      TensorShapeVector aclKernelShape(2);
       aclKernelShape[0] = (kernel_shape.size() > 1) ? kernel_shape[1] : 1;
       aclKernelShape[1] = kernel_shape[0];
 
@@ -104,24 +110,28 @@ ACLNEPool PoolOperation(onnxruntime::OpKernelContext* context,
       LOGS_DEFAULT(VERBOSE) << "strides: {" << aclStrides[0] << "," << aclStrides[1] << "}";
       LOGS_DEFAULT(VERBOSE) << "excludePadding: " << excludePadding;
 
-      arm_compute::PoolingLayerInfo pool_info(pool_type, aclSize, aclPadStride, excludePadding);
+      arm_compute::PoolingLayerInfo pool_info(pool_type,
+                                              aclSize,
+                                              arm_compute::DataLayout::NCHW,
+                                              aclPadStride,
+                                              excludePadding);
       layer->configure(tpool.in.get(), tpool.out.get(), pool_info);
     }
 
-    // allocate space for input tensor to accomodate paddings and strides
+    // allocate space for input tensor to accommodate paddings and strides
     tpool.in->allocator()->allocate();
 
     tpool.layer = std::move(layer);
   } else {
     tpool = it->second;
   }
-  const T* x_data = X->template Data<T>();
+  const T* x_data = X->Data<T>();
   arm_compute::Window aclInpuWindow;
   aclInpuWindow.use_tensor_dimensions(tpool.in->info()->tensor_shape());
 
   arm_compute::Iterator aclInputIt(tpool.in.get(), aclInpuWindow);
-  const unsigned int aclWidth = tpool.in->info()->dimension(0);
-  const unsigned int aclHeight = tpool.in->info()->dimension(1);
+  const size_t aclWidth = tpool.in->info()->dimension(0);
+  const size_t aclHeight = tpool.in->info()->dimension(1);
 
   // copy input tensor into the larger buffer
   arm_compute::execute_window_loop(
@@ -131,7 +141,7 @@ ACLNEPool PoolOperation(onnxruntime::OpKernelContext* context,
       },
       aclInputIt);
 
-  T* y_data = Y->template MutableData<T>();
+  T* y_data = Y->MutableData<T>();
   ACLImportMemory(tpool.out->allocator(), (void*)y_data, Y->Shape().Size() * 4);
 
   tpool.layer->run();
@@ -145,8 +155,8 @@ Status Pool<T, PoolType>::Compute(OpKernelContext* context) const {
 
   const Tensor* X = context->Input<Tensor>(0);
 
-  std::vector<int64_t> dilations(PoolBase::pool_attrs_.dilations);
-  std::vector<int64_t> aclDilations(2);
+  TensorShapeVector dilations(PoolBase::pool_attrs_.dilations);
+  InlinedVector<int64_t> aclDilations(2);
   aclDilations[0] = (dilations.size() == 2) ? dilations[1] : 1;
   aclDilations[1] = (!dilations.empty()) ? dilations[0] : 1;
 
@@ -174,12 +184,12 @@ Status Pool<T, PoolType>::Compute(OpKernelContext* context) const {
     return onnxruntime::Pool<T, PoolType>::Compute(context);
   }
 
-  PoolLayersIterator it = Pool::poolLayers.find((OpKernel*) this);
+  PoolLayersIterator it = Pool::poolLayers.find((OpKernel*)this);
   bool insert = it == Pool::poolLayers.end();
   ACLNEPool pPool = PoolOperation<T>(context, pool_type, PoolBase::pool_attrs_, it, insert);
-  if(insert){
+  if (insert) {
     std::pair<PoolLayersIterator, bool> ret;
-    ret = Pool::poolLayers.insert(std::pair<OpKernel*, ACLNEPool>((OpKernel*) this, pPool));
+    ret = Pool::poolLayers.insert(std::pair<OpKernel*, ACLNEPool>((OpKernel*)this, pPool));
   }
 
   LOGS_DEFAULT(VERBOSE) << std::endl;
@@ -191,8 +201,8 @@ template <typename T>
 Status MaxPoolV8<T>::Compute(OpKernelContext* context) const {
   const Tensor* X = context->Input<Tensor>(0);
 
-  std::vector<int64_t> dilations(PoolBase::pool_attrs_.dilations);
-  std::vector<int64_t> aclDilations(2);
+  TensorShapeVector dilations(PoolBase::pool_attrs_.dilations);
+  InlinedVector<int64_t> aclDilations(2);
   aclDilations[0] = (dilations.size() == 2) ? dilations[1] : 1;
   aclDilations[1] = (!dilations.empty()) ? dilations[0] : 1;
 
@@ -210,12 +220,12 @@ Status MaxPoolV8<T>::Compute(OpKernelContext* context) const {
 
   LOGS_DEFAULT(VERBOSE) << "MaxPoolV8";
 
-  PoolLayersIterator it = MaxPoolV8::maxPoolLayers.find((OpKernel*) this);
+  PoolLayersIterator it = MaxPoolV8::maxPoolLayers.find((OpKernel*)this);
   bool insert = it == MaxPoolV8::maxPoolLayers.end();
   ACLNEPool pPool = PoolOperation<T>(context, arm_compute::PoolingType::MAX, PoolBase::pool_attrs_, it, insert);
-  if(insert){
+  if (insert) {
     std::pair<PoolLayersIterator, bool> ret;
-    ret = MaxPoolV8::maxPoolLayers.insert(std::pair<OpKernel*, ACLNEPool>((OpKernel*) this, pPool));
+    ret = MaxPoolV8::maxPoolLayers.insert(std::pair<OpKernel*, ACLNEPool>((OpKernel*)this, pPool));
   }
 
   LOGS_DEFAULT(VERBOSE) << std::endl;
@@ -240,15 +250,15 @@ POOLING_KERNEL(AveragePool, float, AveragePool, 10, 10)
 POOLING_KERNEL(GlobalAveragePool, float, AveragePool, 1, 8)
 POOLING_KERNEL(GlobalMaxPool, float, MaxPool<1>, 1, 8)
 
-ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_EX(                                            \
-      MaxPool,                                                                      \
-      kOnnxDomain,                                                                  \
-      8,                                                                            \
-      11,                                                                           \
-      float,                                                                        \
-      kAclExecutionProvider,                                                        \
-      KernelDefBuilder().TypeConstraint("T", DataTypeImpl::GetTensorType<float>()), \
-      MaxPoolV8<float>);
+ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_EX(
+    MaxPool,
+    kOnnxDomain,
+    8,
+    11,
+    float,
+    kAclExecutionProvider,
+    KernelDefBuilder().TypeConstraint("T", DataTypeImpl::GetTensorType<float>()),
+    MaxPoolV8<float>);
 
 ONNX_OPERATOR_KERNEL_EX(
     MaxPool,
@@ -265,7 +275,6 @@ ONNX_OPERATOR_KERNEL_EX(
     kAclExecutionProvider,
     KernelDefBuilder().TypeConstraint("T", DataTypeImpl::GetTensorType<float>()),
     Pool<float, AveragePool>);
-
 
 }  // namespace acl
 }  // namespace onnxruntime

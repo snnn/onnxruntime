@@ -1,19 +1,25 @@
 parameters:
-  AgentPool: 'Linux-CPU'
-  JobSuffix: ''
-
-jobs:
-- job: Nodejs_Test_${{ parameters.JobSuffix }}
-  workspace:
-    clean: all
-  timeoutInMinutes:  120
-  pool: ${{ parameters.AgentPool }}
+  AgentPool: 'Azure-Pipelines-EO-Ubuntu-2004-aiinfra'
+  StageSuffix: ''
+stages:
+- stage: Nodejs_Test_${{ parameters.StageSuffix }}
   dependsOn:
-  - Nodejs_Packaging_CPU
+  - Nodejs_Packaging
   condition: succeeded()
-  variables:
-  - name: OnnxRuntimeBuildDirectory
-    value: '$(Build.BinariesDirectory)'
-  steps:
-  - template: test.yml
-  
+  jobs:
+  - job: Nodejs_Test_${{ parameters.StageSuffix }}
+    workspace:
+      clean: all
+    timeoutInMinutes: 120
+    pool:
+      name: ${{ parameters.AgentPool }}
+      os: 'linux'
+
+    variables:
+    - name: OnnxRuntimeBuildDirectory
+      value: '$(Build.BinariesDirectory)'
+    steps:
+    - task: NodeTool@0
+      inputs:
+        versionSpec: '20.x'
+    - template: test.yml

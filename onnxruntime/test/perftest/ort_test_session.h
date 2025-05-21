@@ -25,7 +25,7 @@ class OnnxRuntimeTestSession : public TestSession {
     test_inputs_[test_data_id][input_id] = std::move(value);
   }
 
-  bool PopulateGeneratedInputTestData();
+  bool PopulateGeneratedInputTestData(int32_t seed);
 
   ~OnnxRuntimeTestSession() = default;
 
@@ -37,7 +37,11 @@ class OnnxRuntimeTestSession : public TestSession {
   Ort::Session session_{nullptr};
   std::mt19937 rand_engine_;
   std::uniform_int_distribution<int> dist_;
+  OrtAllocator* allocator_ = Ort::AllocatorWithDefaultOptions();
+  // Note: custom_allocator_, if used, must outlive the `Ort::Value`s allocated with it in test_inputs_ and outputs_.
+  Ort::Allocator custom_allocator_{nullptr};
   std::vector<std::vector<Ort::Value>> test_inputs_;
+  std::vector<Ort::Value> outputs_;
   std::vector<std::string> output_names_;
   // The same size with output_names_.
   // TODO: implement a customized allocator, then we can remove output_names_ to simplify this code
@@ -45,6 +49,8 @@ class OnnxRuntimeTestSession : public TestSession {
   std::vector<const char*> input_names_;
   std::vector<std::string> input_names_str_;
   const int input_length_;
+  std::string provider_name_;
+  std::string device_memory_name_;  // Device memory type name to use from the list in allocator.h
 };
 
 }  // namespace perftest

@@ -42,6 +42,18 @@
 #ifdef HAS_CLASS_MEMACCESS
 #pragma GCC diagnostic ignored "-Wclass-memaccess"
 #endif
+
+// cmake/external/eigen\Eigen/src/SparseCore/TriangularSolver.h:273:13:
+// error: variable 'count' set but not used [-Werror,-Wunused-but-set-variable]
+//   Index count = 0;
+#ifdef HAS_UNUSED_BUT_SET_VARIABLE
+#pragma GCC diagnostic ignored "-Wunused-but-set-variable"
+#endif
+
+#ifdef HAS_DEPRECATED_DECLARATIONS
+#pragma GCC diagnostic ignored "-Wdeprecated-declarations"
+#endif
+
 #elif defined(_MSC_VER)
 // build\windows\debug\external\eigen3\unsupported\eigen\cxx11\src/Tensor/Tensor.h(76):
 // warning C4554: '&': check operator precedence for possible error; use parentheses to clarify precedence
@@ -62,9 +74,6 @@
 #pragma warning(pop)
 #endif
 
-#ifndef SHARED_PROVIDER
-#include "core/framework/tensor.h"
-#endif
 namespace onnxruntime {
 
 // common Eigen types that we will often use
@@ -84,7 +93,7 @@ template <typename T>
 using ConstEigenMatrixMap = Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic>>;
 
 template <class T>
-using ConstSparseMatrixMap = Eigen::Map<const Eigen::SparseMatrix<T, Eigen::RowMajor, int64_t>>;
+using ConstSparseMatrixMap = Eigen::Map<const Eigen::SparseMatrix<T, Eigen::RowMajor, Eigen::Index>>;
 
 template <typename T>
 using ConstEigenArrayMap = Eigen::Map<const Eigen::Array<T, Eigen::Dynamic, Eigen::Dynamic>>;
@@ -108,15 +117,6 @@ using EigenMatrixMapRowMajorOuterStride =
 template <typename T>
 using ConstEigenMatrixMapRowMajorOuterStride =
     Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, Eigen::Dynamic, Eigen::RowMajor>, 0, Eigen::OuterStride<>>;
-
-template <typename T>
-auto EigenMap(Tensor& t) -> EigenVectorMap<T> {
-  return EigenVectorMap<T>(t.template MutableData<T>(), gsl::narrow<ptrdiff_t>(t.Shape().Size()));
-}
-template <typename T>
-auto EigenMap(const Tensor& t) -> ConstEigenVectorMap<T> {
-  return ConstEigenVectorMap<T>(t.template Data<T>(), gsl::narrow<ptrdiff_t>(t.Shape().Size()));
-}
 
 class CPUMathUtil {
  public:

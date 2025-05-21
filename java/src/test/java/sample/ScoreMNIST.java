@@ -30,6 +30,7 @@ import java.util.regex.Pattern;
 public class ScoreMNIST {
 
   private static final Logger logger = Logger.getLogger(ScoreMNIST.class.getName());
+
   /** Pattern for splitting libsvm format files. */
   private static final Pattern splitPattern = Pattern.compile("\\s+");
 
@@ -241,7 +242,7 @@ public class ScoreMNIST {
   /**
    * Find the maximum probability and return it's index.
    *
-   * @param probabilities The probabilites.
+   * @param probabilities The probabilities.
    * @return The index of the max.
    */
   public static int pred(float[] probabilities) {
@@ -263,8 +264,8 @@ public class ScoreMNIST {
       return;
     }
 
-    try (OrtEnvironment env = OrtEnvironment.getEnvironment();
-        OrtSession.SessionOptions opts = new SessionOptions()) {
+    OrtEnvironment env = OrtEnvironment.getEnvironment();
+    try (OrtSession.SessionOptions opts = new SessionOptions()) {
 
       opts.setOptimizationLevel(OptLevel.BASIC_OPT);
 

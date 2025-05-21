@@ -11,8 +11,10 @@
 #include "core/providers/cpu/containers.h"
 #include "core/util/math.h"
 #endif
+#include "core/framework/math.h"
 #include "core/util/math_cpuonly.h"
 #include "core/platform/threadpool.h"
+#include "core/providers/cpu/reduction/reduction_kernel_base.h"
 #include "core/common/safeint.h"
 #include <cmath>
 
@@ -25,7 +27,8 @@ enum FastReduceKind {
   kKR = 4,     // kept dim, reduced dim
   kRK = 8,     // reduced dim, kept dim
   kKRK = 16,   // kept dim, reduced dim, kept dim
-  kEmpty = 32  // empty reduce
+  kRKR = 32,   // reduced dim, kept dim, reduced dim
+  kEmpty = 64  // empty reduce
 };
 
 FastReduceKind operator|(FastReduceKind a, FastReduceKind b);
@@ -54,6 +57,7 @@ constexpr TensorOpCost ParallelReduceFastCost(int64_t n_row, int64_t n_col, int6
   *  KR - reduction on the last dimensions
   *  RK - reduction on the first dimensions
   *  KRK - reduction on the middle dimensions.
+  *  RKR - reduction on all dimensions but the middle ones
 
   For these three configuration, the reduction may be optimized
   with vectors operations. Method WhichFastReduce() returns which case
@@ -154,6 +158,7 @@ class ReduceAggregatorBase {
   static void FastReduceKR(const Tensor&, const gsl::span<const int64_t>&, Tensor&, concurrency::ThreadPool*);
   static void FastReduceRK(const Tensor&, const gsl::span<const int64_t>&, Tensor&, concurrency::ThreadPool*);
   static void FastReduceKRK(const Tensor&, const gsl::span<const int64_t>&, Tensor&, concurrency::ThreadPool*);
+  static void FastReduceRKR(const Tensor&, const gsl::span<const int64_t>&, Tensor&, concurrency::ThreadPool*);
 };
 
 template <typename T, typename TVAL = T>
@@ -175,20 +180,53 @@ class ReduceAggregator : public ReduceAggregatorBase {
   inline void update0(const T&) {}
   inline TVAL aggall(const T*) {}
   inline TVAL get_value() { return accumulator_; }
+  static void fill_for_empty_set(Tensor&) { ORT_NOT_IMPLEMENTED(); }
+
+ protected:
+  static void CommonFastReduceRKR(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
+                                  Tensor& output, concurrency::ThreadPool* tp,
+                                  std::function<TVAL(const T*)> f_init,
+                                  std::function<void(TVAL&, const T*, int64_t)> f_update) {
+    const T* data = input.Data<T>();
+    TVAL* out = output.MutableData<TVAL>();
+    int64_t d0 = fast_shape[0];
+    int64_t d2 = fast_shape[2];
+    int64_t inc = d2 * fast_shape[1];
+
+    concurrency::ThreadPool::TryParallelFor(
+        tp, onnxruntime::narrow<ptrdiff_t>(fast_shape[1]), ParallelReduceFastCost(fast_shape[1], fast_shape[0] * fast_shape[2], sizeof(T), 6),
+        [data, out, d0, d2, inc, f_init, f_update](ptrdiff_t begin, ptrdiff_t last) {
+          const T* p;
+          for (ptrdiff_t d = begin; d < last; ++d) {
+            p = data + d * d2;
+            out[d] = f_init(p);
+            for (int64_t i = 0; i < d0; ++i, p += inc) {
+              f_update(out[d], p, d2);
+            }
+          }
+        });
+  }
 };
 
-template <typename T, typename TVAL = T>
-class ReduceAggregatorSum : public ReduceAggregator<T, TVAL> {
+template <typename T>
+class ReduceAggregatorSum : public ReduceAggregator<T, T> {
  public:
-  inline ReduceAggregatorSum(int64_t N, const T&) : ReduceAggregator<T, TVAL>(N, 0) {}
+  inline ReduceAggregatorSum(int64_t N, const T&) : ReduceAggregator<T, T>(N, 0) {}
   inline void update(const T& v) { this->accumulator_ += v; }
-  inline TVAL aggall(const T* from_data) {
-    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).sum();
+  static T aggall(const T* from_data, int64_t size) {
+    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(size)).sum();
+  }
+  inline T aggall(const T* from_data) {
+    return aggall(from_data, this->N_);
+  }
+
+  static void fill_for_empty_set(Tensor& output) {
+    EigenMap<T>(output).array() = static_cast<T>(0);
   }
 
   // Fast reduction
   static inline FastReduceKind WhichFastReduce() {
-    return FastReduceKind::kKR | FastReduceKind::kRK | FastReduceKind::kKRK;
+    return FastReduceKind::kKR | FastReduceKind::kRK | FastReduceKind::kKRK | FastReduceKind::kRKR;
   }
 
   static void FastReduceKR(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
@@ -197,10 +235,10 @@ class ReduceAggregatorSum : public ReduceAggregator<T, TVAL> {
     T* out = output.MutableData<T>();
     int64_t stridei = fast_shape[1];
     concurrency::ThreadPool::TryParallelFor(
-        tp, fast_shape[0], ParallelReduceFastCost(1, stridei, sizeof(T), 6),
+        tp, onnxruntime::narrow<std::ptrdiff_t>(fast_shape[0]), ParallelReduceFastCost(1, stridei, sizeof(T), 6),
         [data, stridei, out](ptrdiff_t first, ptrdiff_t last) {
           for (ptrdiff_t d = first; d < last; ++d) {
-            out[d] = ConstEigenVectorArrayMap<T>(data + d * stridei, stridei).sum();
+            out[d] = aggall(data + d * stridei, stridei);
           }
         });
   }
@@ -212,9 +250,9 @@ class ReduceAggregatorSum : public ReduceAggregator<T, TVAL> {
     T* out = output.MutableData<T>();
 
     int64_t n_rows = fast_shape[0];
-    memcpy(out, data, N * sizeof(T));
+    memcpy(out, data, SafeInt<size_t>(N) * sizeof(T));
     concurrency::ThreadPool::TryParallelFor(
-        tp, N, ParallelReduceFastCost(1, n_rows, sizeof(T), 6),
+        tp, onnxruntime::narrow<std::ptrdiff_t>(N), ParallelReduceFastCost(1, n_rows, sizeof(T), 6),
         [data, out, N, n_rows](ptrdiff_t begin, ptrdiff_t end) {
           for (int64_t row = 1; row < n_rows; ++row) {
             EigenVectorArrayMap<T>(out + begin, end - begin) += ConstEigenVectorArrayMap<T>(
@@ -230,13 +268,23 @@ class ReduceAggregatorSum : public ReduceAggregator<T, TVAL> {
     int64_t stridei = fast_shape[1] * fast_shape[2];
     int64_t strideo = fast_shape[2];
     T* out = output.MutableData<T>();
-    std::vector<T> one(fast_shape[1], 1);
+    std::vector<T> one(onnxruntime::narrow<size_t>(fast_shape[1]), 1);
     concurrency::ThreadPool::TryParallelFor(
-        tp, fast_shape[0], ParallelReduceFastCost(fast_shape[1], fast_shape[2], sizeof(T), 6),
+        tp, onnxruntime::narrow<ptrdiff_t>(fast_shape[0]), ParallelReduceFastCost(fast_shape[1], fast_shape[2], sizeof(T), 6),
         [one, data, fast_shape, stridei, strideo, out, N](ptrdiff_t begin, ptrdiff_t last) {
           for (ptrdiff_t d = begin; d < last; ++d) {
-            math::MatMul<T>(1, N, fast_shape[1], one.data(), data + stridei * d, out + strideo * d, nullptr);
+            math::MatMul<T>(1, onnxruntime::narrow<ptrdiff_t>(N), onnxruntime::narrow<ptrdiff_t>(fast_shape[1]), one.data(), data + stridei * d, out + strideo * d, nullptr);
           }
+        });
+  }
+
+  static void FastReduceRKR(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
+                            Tensor& output, concurrency::ThreadPool* tp) {
+    ReduceAggregator<T, T>::CommonFastReduceRKR(
+        input, fast_shape, output, tp,
+        [=](const T*) -> T { return 0; },
+        [=](T& value, const T* p, int64_t size) {
+          value += aggall(p, size);
         });
   }
 };
@@ -246,17 +294,23 @@ class ReduceAggregatorSumSquare : public ReduceAggregator<T, TVAL> {
  public:
   inline ReduceAggregatorSumSquare(int64_t N, const T&) : ReduceAggregator<T, TVAL>(N, 0) {}
   inline TVAL aggall(const T* from_data) {
-    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).squaredNorm();
+    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(this->N_)).squaredNorm();
   }
   inline void update(const T& v) { this->accumulator_ += v * v; }
+  static void fill_for_empty_set(Tensor& output) {
+    EigenMap<T>(output).array() = static_cast<T>(0);
+  }
 };
 
-template <typename T, typename TVAL = T>
-class ReduceAggregatorMean : public ReduceAggregatorSum<T, TVAL> {
+template <typename T>
+class ReduceAggregatorMean : public ReduceAggregatorSum<T> {
  public:
-  inline ReduceAggregatorMean(int64_t N, const T&) : ReduceAggregatorSum<T, TVAL>(N, 0) {}
+  inline ReduceAggregatorMean(int64_t N, const T&) : ReduceAggregatorSum<T>(N, 0) {}
+  static T aggall(const T* from_data, int64_t size) {
+    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(size)).mean();
+  }
   inline T aggall(const T* from_data) {
-    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).mean();
+    return aggall(from_data, this->N_);
   }
   inline T get_value() { return this->accumulator_ / static_cast<T>(this->N_); }
 
@@ -265,7 +319,7 @@ class ReduceAggregatorMean : public ReduceAggregatorSum<T, TVAL> {
 
   static void FastReduceKR(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
                            Tensor& output, concurrency::ThreadPool* tp) {
-    ReduceAggregatorSum<T, TVAL>::FastReduceKR(input, fast_shape, output, tp);
+    ReduceAggregatorSum<T>::FastReduceKR(input, fast_shape, output, tp);
     // TODO: use MLAS or BLAS
     T* out = output.MutableData<T>();
     T* end = out + fast_shape[0];
@@ -276,7 +330,7 @@ class ReduceAggregatorMean : public ReduceAggregatorSum<T, TVAL> {
 
   static void FastReduceRK(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
                            Tensor& output, concurrency::ThreadPool* tp) {
-    ReduceAggregatorSum<T, TVAL>::FastReduceRK(input, fast_shape, output, tp);
+    ReduceAggregatorSum<T>::FastReduceRK(input, fast_shape, output, tp);
     // TODO: use MLAS or BLAS
     T* out = output.MutableData<T>();
     T* end = out + fast_shape[1];
@@ -287,7 +341,7 @@ class ReduceAggregatorMean : public ReduceAggregatorSum<T, TVAL> {
 
   static void FastReduceKRK(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
                             Tensor& output, concurrency::ThreadPool* tp) {
-    ReduceAggregatorSum<T, TVAL>::FastReduceKRK(input, fast_shape, output, tp);
+    ReduceAggregatorSum<T>::FastReduceKRK(input, fast_shape, output, tp);
     int64_t strideo = fast_shape[2];
     T* out = output.MutableData<T>();
     T* begin;
@@ -301,20 +355,46 @@ class ReduceAggregatorMean : public ReduceAggregatorSum<T, TVAL> {
       }
     }
   }
+
+  static void FastReduceRKR(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
+                            Tensor& output, concurrency::ThreadPool* tp) {
+    ReduceAggregatorSum<T>::FastReduceRKR(input, fast_shape, output, tp);
+    T* out = output.MutableData<T>();
+    T div = static_cast<T>(fast_shape[0] * fast_shape[2]);
+    T* end = out + fast_shape[1];
+    for (; out != end; ++out) {
+      *out /= div;
+    }
+  }
 };
 
-template <typename T, typename TVAL = T>
-class ReduceAggregatorMax : public ReduceAggregator<T, TVAL> {
+template <typename T>
+class ReduceAggregatorMax : public ReduceAggregator<T> {
  public:
-  inline ReduceAggregatorMax(int64_t N, const T& init) : ReduceAggregator<T, TVAL>(N, init) {}
-  inline TVAL aggall(const T* from_data) {
-    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).maxCoeff();
+  inline ReduceAggregatorMax(int64_t N, const T& init) : ReduceAggregator<T, T>(N, init) {}
+  static T aggall(const T* from_data, int64_t size) {
+    if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+      return Eigen::Map<const Eigen::Matrix<bool, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(size)).cast<int>().maxCoeff();
+    } else { /* generic impl */
+      return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(size)).maxCoeff();
+    }
+  }
+  inline T aggall(const T* from_data) {
+    return aggall(from_data, this->N_);
   }
   inline void update(const T& v) { this->accumulator_ = v > this->accumulator_ ? v : this->accumulator_; }
 
+  static void fill_for_empty_set(Tensor& output) {
+    if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+      ORT_NOT_IMPLEMENTED();
+    } else {
+      EigenMap<T>(output).array() = -std::numeric_limits<T>::infinity();
+    }
+  }
+
   // Fast reduction
   static inline FastReduceKind WhichFastReduce() {
-    return FastReduceKind::kKR | FastReduceKind::kRK | FastReduceKind::kKRK;
+    return FastReduceKind::kKR | FastReduceKind::kRK | FastReduceKind::kKRK | FastReduceKind::kRKR;
   }
 
   static void FastReduceKR(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
@@ -323,12 +403,21 @@ class ReduceAggregatorMax : public ReduceAggregator<T, TVAL> {
     T* out = output.MutableData<T>();
     int64_t stridei = fast_shape[1];
     concurrency::ThreadPool::TryParallelFor(
-        tp, fast_shape[0], ParallelReduceFastCost(1, stridei, sizeof(T), 6),
+        tp, onnxruntime::narrow<std::ptrdiff_t>(fast_shape[0]), ParallelReduceFastCost(1, stridei, sizeof(T), 6),
         [data, stridei, out](std::ptrdiff_t first, std::ptrdiff_t last) {
-          EigenVectorMap<T>(out + first, last - first) = ConstEigenMatrixMap<T>(
-                                                             data + first * stridei, stridei, last - first)
-                                                             .colwise()
-                                                             .maxCoeff();
+          if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+            EigenVectorMap<bool>(out + first, last - first) = ConstEigenMatrixMap<bool>(
+                                                                  data + first * stridei, onnxruntime::narrow<size_t>(stridei), last - first)
+                                                                  .cast<unsigned char>()
+                                                                  .colwise()
+                                                                  .maxCoeff()
+                                                                  .cast<bool>();
+          } else {
+            EigenVectorMap<T>(out + first, last - first) = ConstEigenMatrixMap<T>(
+                                                               data + first * stridei, onnxruntime::narrow<size_t>(stridei), last - first)
+                                                               .colwise()
+                                                               .maxCoeff();
+          }
         });
   }
 
@@ -338,16 +427,21 @@ class ReduceAggregatorMax : public ReduceAggregator<T, TVAL> {
     int64_t N = fast_shape[1];
     const T* data = input.Data<T>();
     T* out = output.MutableData<T>();
-    memcpy(out, data, N * sizeof(T));
+    memcpy(out, data, SafeInt<size_t>(N) * sizeof(T));
 
     concurrency::ThreadPool::TryParallelFor(
-        tp, N, ParallelReduceFastCost(1, n_rows, sizeof(T), 6),
+        tp, onnxruntime::narrow<std::ptrdiff_t>(N), ParallelReduceFastCost(1, n_rows, sizeof(T), 6),
         [data, out, N, n_rows](ptrdiff_t begin, ptrdiff_t end) {
           const T* p;
           for (int64_t row = 1; row < n_rows; ++row) {
             p = data + row * N;
             for (int64_t j = begin; j < end; ++j) {
-              out[j] = out[j] > p[j] ? out[j] : p[j];
+              if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+                out[j] = out[j] || p[j];
+              } else {
+                if (out[j] < p[j])
+                  out[j] = p[j];
+              }
             }
           }
         });
@@ -360,14 +454,40 @@ class ReduceAggregatorMax : public ReduceAggregator<T, TVAL> {
     int64_t stridei = fast_shape[1] * fast_shape[2];
     int64_t strideo = fast_shape[2];
     concurrency::ThreadPool::TryParallelFor(
-        tp, fast_shape[0], ParallelReduceFastCost(fast_shape[1], fast_shape[2], sizeof(T), 6),
+        tp, onnxruntime::narrow<std::ptrdiff_t>(fast_shape[0]), ParallelReduceFastCost(fast_shape[1], fast_shape[2], sizeof(T), 6),
         [data, fast_shape, stridei, strideo, out](ptrdiff_t begin, ptrdiff_t end) {
           for (ptrdiff_t j = begin; j < end; ++j) {
-            EigenVectorMap<T>(out + j * strideo, strideo) =
-                ConstEigenMatrixMap<T>(
-                    data + j * stridei, fast_shape[2], fast_shape[1])
-                    .rowwise()
-                    .maxCoeff();
+            if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+              EigenVectorMap<bool>(out + j * strideo, onnxruntime::narrow<size_t>(strideo)) =
+                  ConstEigenMatrixMap<bool>(
+                      data + j * stridei, onnxruntime::narrow<size_t>(fast_shape[2]), onnxruntime::narrow<size_t>(fast_shape[1]))
+                      .cast<unsigned char>()
+                      .rowwise()
+                      .maxCoeff()
+                      .cast<bool>();
+            } else {
+              EigenVectorMap<T>(out + j * strideo, onnxruntime::narrow<size_t>(strideo)) =
+                  ConstEigenMatrixMap<T>(
+                      data + j * stridei, onnxruntime::narrow<size_t>(fast_shape[2]), onnxruntime::narrow<size_t>(fast_shape[1]))
+                      .rowwise()
+                      .maxCoeff();
+            }
+          }
+        });
+  }
+
+  static void FastReduceRKR(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
+                            Tensor& output, concurrency::ThreadPool* tp) {
+    ReduceAggregator<T, T>::CommonFastReduceRKR(
+        input, fast_shape, output, tp,
+        [=](const T* p) -> T { return p[0]; },
+        [=](T& value, const T* p, int64_t size) {
+          T v = aggall(p, size);
+          if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+            value = value || v;
+          } else {
+            if (v > value)
+              value = v;
           }
         });
   }
@@ -395,7 +515,7 @@ class ReduceAggregatorArgMax : public ReduceAggregatorArgMinMax<T, TVAL> {
  public:
   inline ReduceAggregatorArgMax(int64_t N, const T& init) : ReduceAggregatorArgMinMax<T, TVAL>(N, init) {}
   inline TVAL aggall(const T* from_data) {
-    Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).maxCoeff(&this->arg_);
+    Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(this->N_)).maxCoeff(&this->arg_);
     return this->get_value();
   }
   inline void update(const T& v) {
@@ -431,7 +551,7 @@ class ReduceAggregatorArgMin : public ReduceAggregatorArgMinMax<T, TVAL> {
  public:
   inline ReduceAggregatorArgMin(int64_t N, const T& init) : ReduceAggregatorArgMinMax<T, TVAL>(N, init) {}
   inline TVAL aggall(const T* from_data) {
-    Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).minCoeff(&this->arg_);
+    Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(this->N_)).minCoeff(&this->arg_);
     return this->get_value();
   }
   inline void update(const T& v) {
@@ -462,18 +582,29 @@ class ReduceAggregatorArgMinLastIndex : public ReduceAggregatorArgMin<T, TVAL> {
   }
 };
 
-template <typename T, typename TVAL = T>
-class ReduceAggregatorMin : public ReduceAggregator<T, TVAL> {
+template <typename T>
+class ReduceAggregatorMin : public ReduceAggregator<T, T> {
  public:
-  inline ReduceAggregatorMin(int64_t N, const T& init) : ReduceAggregator<T, TVAL>(N, init) {}
-  inline TVAL aggall(const T* from_data) {
-    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).minCoeff();
+  inline ReduceAggregatorMin(int64_t N, const T& init) : ReduceAggregator<T, T>(N, init) {}
+  static T aggall(const T* from_data, int64_t size) {
+    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(size)).minCoeff();
+  }
+  inline T aggall(const T* from_data) {
+    return aggall(from_data, this->N_);
   }
   inline void update(const T& v) { this->accumulator_ = v < this->accumulator_ ? v : this->accumulator_; }
 
+  static void fill_for_empty_set(Tensor& output) {
+    if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+      ORT_NOT_IMPLEMENTED();
+    } else {
+      EigenMap<T>(output).array() = std::numeric_limits<T>::infinity();
+    }
+  }
+
   // Fast reduction
   static inline FastReduceKind WhichFastReduce() {
-    return FastReduceKind::kKR | FastReduceKind::kRK | FastReduceKind::kKRK;
+    return FastReduceKind::kKR | FastReduceKind::kRK | FastReduceKind::kKRK | FastReduceKind::kRKR;
   }
 
   static void FastReduceKR(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
@@ -482,12 +613,21 @@ class ReduceAggregatorMin : public ReduceAggregator<T, TVAL> {
     T* out = output.MutableData<T>();
     int64_t stridei = fast_shape[1];
     concurrency::ThreadPool::TryParallelFor(
-        tp, fast_shape[0], ParallelReduceFastCost(1, stridei, sizeof(T), 6),
+        tp, onnxruntime::narrow<std::ptrdiff_t>(fast_shape[0]), ParallelReduceFastCost(1, stridei, sizeof(T), 6),
         [data, stridei, out](std::ptrdiff_t first, std::ptrdiff_t last) {
-          EigenVectorMap<T>(out + first, last - first) = ConstEigenMatrixMap<T>(
-                                                             data + first * stridei, stridei, last - first)
-                                                             .colwise()
-                                                             .minCoeff();
+          if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+            EigenVectorMap<bool>(out + first, last - first) = ConstEigenMatrixMap<bool>(
+                                                                  data + first * stridei, onnxruntime::narrow<size_t>(stridei), last - first)
+                                                                  .cast<unsigned char>()
+                                                                  .colwise()
+                                                                  .minCoeff()
+                                                                  .cast<bool>();
+          } else {
+            EigenVectorMap<T>(out + first, last - first) = ConstEigenMatrixMap<T>(
+                                                               data + first * stridei, onnxruntime::narrow<size_t>(stridei), last - first)
+                                                               .colwise()
+                                                               .minCoeff();
+          }
         });
   }
 
@@ -497,16 +637,21 @@ class ReduceAggregatorMin : public ReduceAggregator<T, TVAL> {
     int64_t N = fast_shape[1];
     const T* data = input.Data<T>();
     T* out = output.MutableData<T>();
-    memcpy(out, data, N * sizeof(T));
+    memcpy(out, data, SafeInt<size_t>(N) * sizeof(T));
 
     concurrency::ThreadPool::TryParallelFor(
-        tp, N, ParallelReduceFastCost(1, n_rows, sizeof(T), 6),
+        tp, onnxruntime::narrow<std::ptrdiff_t>(N), ParallelReduceFastCost(1, n_rows, sizeof(T), 6),
         [data, out, N, n_rows](ptrdiff_t begin, ptrdiff_t end) {
           const T* p;
           for (int64_t row = 1; row < n_rows; ++row) {
             p = data + row * N;
             for (int64_t j = begin; j < end; ++j) {
-              out[j] = out[j] < p[j] ? out[j] : p[j];
+              if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+                out[j] = out[j] && p[j];
+              } else {
+                if (out[j] > p[j])
+                  out[j] = p[j];
+              }
             }
           }
         });
@@ -519,72 +664,111 @@ class ReduceAggregatorMin : public ReduceAggregator<T, TVAL> {
     int64_t stridei = fast_shape[1] * fast_shape[2];
     int64_t strideo = fast_shape[2];
     concurrency::ThreadPool::TryParallelFor(
-        tp, fast_shape[0], ParallelReduceFastCost(fast_shape[1], fast_shape[2], sizeof(T), 6),
+        tp, onnxruntime::narrow<std::ptrdiff_t>(fast_shape[0]), ParallelReduceFastCost(fast_shape[1], fast_shape[2], sizeof(T), 6),
         [data, fast_shape, stridei, strideo, out](ptrdiff_t begin, ptrdiff_t end) {
           for (ptrdiff_t j = begin; j < end; ++j) {
-            EigenVectorMap<T>(out + j * strideo, strideo) =
-                ConstEigenMatrixMap<T>(
-                    data + j * stridei, fast_shape[2], fast_shape[1])
-                    .rowwise()
-                    .minCoeff();
+            if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+              EigenVectorMap<bool>(out + j * strideo, onnxruntime::narrow<size_t>(strideo)) =
+                  ConstEigenMatrixMap<bool>(
+                      data + j * stridei, onnxruntime::narrow<size_t>(fast_shape[2]), onnxruntime::narrow<size_t>(fast_shape[1]))
+                      .cast<unsigned char>()
+                      .rowwise()
+                      .minCoeff()
+                      .cast<bool>();
+            } else {
+              EigenVectorMap<T>(out + j * strideo, onnxruntime::narrow<size_t>(strideo)) =
+                  ConstEigenMatrixMap<T>(
+                      data + j * stridei, onnxruntime::narrow<size_t>(fast_shape[2]), onnxruntime::narrow<size_t>(fast_shape[1]))
+                      .rowwise()
+                      .minCoeff();
+            }
+          }
+        });
+  }
+
+  static void FastReduceRKR(const Tensor& input, const gsl::span<const int64_t>& fast_shape,
+                            Tensor& output, concurrency::ThreadPool* tp) {
+    ReduceAggregator<T, T>::CommonFastReduceRKR(
+        input, fast_shape, output, tp,
+        [=](const T* p) -> T { return p[0]; },
+        [=](T& value, const T* p, int64_t size) {
+          T v = aggall(p, size);
+          if constexpr (std::is_same_v<bool, T>) { /* bool specific impl */
+            value = value && v;
+          } else {
+            if (v < value)
+              value = v;
           }
         });
   }
 };
 
-template <typename T, typename TVAL = T>
-class ReduceAggregatorProd : public ReduceAggregator<T, TVAL> {
+template <typename T>
+class ReduceAggregatorProd : public ReduceAggregator<T, T> {
  public:
-  inline ReduceAggregatorProd(int64_t N, const T&) : ReduceAggregator<T, TVAL>(N, 1) {}
-  inline TVAL aggall(const T* from_data) {
-    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).prod();
+  inline ReduceAggregatorProd(int64_t N, const T&) : ReduceAggregator<T, T>(N, 1) {}
+  inline T aggall(const T* from_data) {
+    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(this->N_)).prod();
   }
   inline void update(const T& v) { this->accumulator_ *= v; }
+  static void fill_for_empty_set(Tensor& output) {
+    EigenMap<T>(output).array() = static_cast<T>(1);
+  }
 };
 
-template <typename T, typename TVAL = T>
-class ReduceAggregatorL1 : public ReduceAggregator<T, TVAL> {
+template <typename T>
+class ReduceAggregatorL1 : public ReduceAggregator<T, T> {
  public:
-  inline ReduceAggregatorL1(int64_t N, const T&) : ReduceAggregator<T, TVAL>(N, 0) {}
-  inline TVAL aggall(const T* from_data) {
-    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).cwiseAbs().sum();
+  inline ReduceAggregatorL1(int64_t N, const T&) : ReduceAggregator<T, T>(N, 0) {}
+  inline T aggall(const T* from_data) {
+    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(this->N_)).cwiseAbs().sum();
   }
   inline void update(const T& v) { this->accumulator_ += v > 0 ? v : -v; }
+
+  static void fill_for_empty_set(Tensor& output) {
+    EigenMap<T>(output).array() = static_cast<T>(0);
+  }
 };
 
-template <typename T, typename TVAL = T>
-class ReduceAggregatorL2 : public ReduceAggregator<T, TVAL> {
+template <typename T>
+class ReduceAggregatorL2 : public ReduceAggregator<T, T> {
  public:
-  inline ReduceAggregatorL2(int64_t N, const T&) : ReduceAggregator<T, TVAL>(N, 0) {}
-  inline TVAL aggall(const T* from_data) {
-    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).norm();
+  inline ReduceAggregatorL2(int64_t N, const T&) : ReduceAggregator<T, T>(N, 0) {}
+  inline T aggall(const T* from_data) {
+    return Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(this->N_)).norm();
   }
   inline void update(const T& v) { this->accumulator_ += v * v; }
-  inline TVAL get_value() { return reduce_sqrt<T>(this->accumulator_); }
+  inline T get_value() { return reduce_sqrt<T>(this->accumulator_); }
+  static void fill_for_empty_set(Tensor& output) {
+    EigenMap<T>(output).array() = static_cast<T>(0);
+  }
 };
 
-template <typename T, typename TVAL = T>
-class ReduceAggregatorLogSum : public ReduceAggregator<T, TVAL> {
+template <typename T>
+class ReduceAggregatorLogSum : public ReduceAggregator<T, T> {
  public:
-  inline ReduceAggregatorLogSum(int64_t N, const T&) : ReduceAggregator<T, TVAL>(N, 0) {}
+  inline ReduceAggregatorLogSum(int64_t N, const T&) : ReduceAggregator<T, T>(N, 0) {}
   inline T aggall(const T* from_data) {
-    return reduce_log<T>(Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).sum());
+    return reduce_log<T>(Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(this->N_)).sum());
   }
   inline void update(const T& v) { this->accumulator_ += v; }
-  inline TVAL get_value() { return reduce_log<T>(this->accumulator_); }
+  inline T get_value() { return reduce_log<T>(this->accumulator_); }
+  static void fill_for_empty_set(Tensor& output) {
+    EigenMap<T>(output).array() = -std::numeric_limits<T>::infinity();
+  }
 };
 
-template <typename T, typename TVAL = T>
-class ReduceAggregatorLogSumExp : public ReduceAggregator<T, TVAL> {
+template <typename T>
+class ReduceAggregatorLogSumExp : public ReduceAggregator<T, T> {
  protected:
   T max_;
 
  public:
-  inline ReduceAggregatorLogSumExp(int64_t N, const T& init) : ReduceAggregator<T, TVAL>(N, 0) {
+  inline ReduceAggregatorLogSumExp(int64_t N, const T& init) : ReduceAggregator<T, T>(N, 0) {
     max_ = reduce_isinf(init) ? this->accumulator_ : init;
   }
-  inline TVAL aggall(const T* from_data) {
-    max_ = Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, this->N_).maxCoeff();
+  inline T aggall(const T* from_data) {
+    max_ = Eigen::Map<const Eigen::Matrix<T, Eigen::Dynamic, 1>>(from_data, onnxruntime::narrow<size_t>(this->N_)).maxCoeff();
     for (int64_t i = 0; i < this->N_; ++i) {
       update(from_data[i]);
     }
@@ -594,7 +778,10 @@ class ReduceAggregatorLogSumExp : public ReduceAggregator<T, TVAL> {
     max_ = (reduce_isinf(v) || reduce_isnan(v) || v < max_) ? max_ : v;
   }
   inline void update(const T& v) { this->accumulator_ += reduce_exp(v - max_); }
-  inline TVAL get_value() { return reduce_log<T>(this->accumulator_) + max_; }
+  inline T get_value() { return reduce_log<T>(this->accumulator_) + max_; }
+  static void fill_for_empty_set(Tensor& output) {
+    EigenMap<T>(output).array() = -std::numeric_limits<T>::infinity();
+  }
 };
 
 void NoTransposePrepareForReduce(const TensorShape& new_input_shape,
@@ -622,35 +809,6 @@ template <typename AGG>
 void CommonReduce2Loops(OpKernelContext* ctx,
                         const gsl::span<const int64_t>& axes_, int64_t keepdims_,
                         bool noop_with_empty_axes = false);
-
-template <bool allow_multi_axes>
-class ReduceKernelBase {
- protected:
-  ReduceKernelBase(const OpKernelInfo& info, optional<int64_t> keepdims_override = {}) {
-    if (allow_multi_axes) {
-      axes_ = ToShapeVector(info.GetAttrsOrDefault<int64_t>("axes"));
-    } else {
-      auto v = info.GetAttrOrDefault<int64_t>("axis", 0);
-      axes_.push_back(v);
-    }
-    int64_t keepdims = 1;
-    if (keepdims_override.has_value()) {
-      keepdims = *keepdims_override;
-    } else {
-      ORT_ENFORCE(info.GetAttr("keepdims", &keepdims).IsOK());
-    }
-    keepdims_ = (keepdims == 1);
-    int64_t noop_with_empty_axes = info.GetAttrOrDefault<int64_t>("noop_with_empty_axes", 0);
-    noop_with_empty_axes_ = (noop_with_empty_axes == 1);
-    int64_t select_last_index = info.GetAttrOrDefault<int64_t>("select_last_index", 0);
-    select_last_index_ = (select_last_index != 0);
-  }
-
-  TensorShapeVector axes_;
-  bool keepdims_;
-  bool noop_with_empty_axes_;
-  bool select_last_index_;
-};
 
 template <bool allow_multi_axes>
 class ReduceKernel : public OpKernel, public ReduceKernelBase<allow_multi_axes> {

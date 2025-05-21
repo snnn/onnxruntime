@@ -1,29 +1,46 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
-// Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include "core/platform/env_var_utils.h"
 #include "gtest/gtest.h"
 #include "test/common/tensor_op_test_utils.h"
 #include "test/common/cuda_op_test_utils.h"
 #include "test/providers/provider_test_utils.h"
+#include "test/util/include/scoped_env_vars.h"
+#include "contrib_ops/cpu/bert/attention_common.h"
+#include "test/contrib_ops/attention_op_test_helper.h"
 
 namespace onnxruntime {
+using contrib::AttentionMaskType;
 namespace test {
-enum MaskIndexType {
-  kMaskIndexEnd = 0,
-  kMaskIndexEndAndStart,
-  kMaskRaw,
-  kMask3D,
-  kMaskDummy,  // Dummy mask with shape [1, 1] or [batch_size, 1]
-  kMask4D      // Megatron GPT2 mask with shape [batch_size, 1, max_sequence_length, max_sequence_length]
-};
+
+template <typename T>
+std::vector<T> ReorderToKvCache(
+    const T* past_data,
+    int batch_size,
+    int effective_sequence_length,
+    int max_sequence_length,
+    int number_of_heads,
+    int head_size) {
+  std::vector<T> arr(2LL * batch_size * number_of_heads * max_sequence_length * head_size);
+  const T* src = past_data;
+  T* dst = arr.data();
+  const int64_t para_size = static_cast<int64_t>(effective_sequence_length) * head_size;
+  const int64_t large_para = static_cast<int64_t>(max_sequence_length) * head_size;
+  for (int64_t ob = 0, obe = 2LL * batch_size * number_of_heads; ob < obe; ob++) {
+    std::copy_n(src, para_size, dst);
+    src += para_size;
+    dst += large_para;
+  }
+  return arr;
+}
 
 static void RunAttentionTest(
-    const std::vector<float>& input_data,    // input:      [batch_size, sequence_length, hidden_size]
-    const std::vector<float>& weights_data,  // weights:    [hidden_size, 3 * hidden_size]
-    bool is_weights_constant,
+    const std::vector<float>& input_data,         // input:      [batch_size, sequence_length, hidden_size]
+    const std::vector<float>& weights_data,       // weights:    [hidden_size, 3 * hidden_size]
+    bool is_weights_constant,                     // weights is constant
     const std::vector<float>& bias_data,          // bias:       [3 * hidden_size]
-    const std::vector<int32_t>& mask_index_data,  // mask_index: [batch_size] or [batch_size, past_sequence_length + sequence_length] or empty
+    const std::vector<int32_t>& mask_index_data,  // mask_index: see MaskIndexType for supported shape
     const std::vector<float>& output_data,        // output:     [batch_size, sequence_length, hidden_size]
     int batch_size,
     int sequence_length,
@@ -35,88 +52,111 @@ static void RunAttentionTest(
     int past_sequence_length = 0,
     const std::vector<float>* past_data = nullptr,
     const std::vector<float>* present_data = nullptr,
-    MaskIndexType mask_index_type = kMaskIndexEnd,
+    AttentionMaskType mask_type = AttentionMaskType::MASK_1D_KEY_SEQ_LEN,
     int input_hidden_size = 0,
     int max_sequence_length = 0,
-    bool only_enable_cuda = false,
-    bool only_enable_cpu = false,
+    const bool disable_cpu = false,
+    const bool disable_cuda = false,
+    const bool disable_rocm = false,
+    const bool disable_dml = false,
     std::vector<int32_t> qkv_sizes = {},
-    const std::vector<float>& extra_add_data = {}) {
+    const std::vector<float>& attention_bias_data = {},
+    int kv_sequence_length = 0,
+    bool past_present_share_buffer = false,
+    bool use_scale = false,
+    bool do_neox_rotary = false) {
   input_hidden_size = (input_hidden_size == 0 ? hidden_size : input_hidden_size);  // By default, no pruning.
+  kv_sequence_length = (kv_sequence_length == 0 ? sequence_length : kv_sequence_length);
+  past_present_share_buffer = past_present_share_buffer && use_past_state;
 
   int min_cuda_architecture = use_float16 ? 530 : 0;
-  bool enable_cuda = HasCudaEnvironment(min_cuda_architecture) && !is_weights_constant && !only_enable_cpu;
-  bool enable_cpu = (nullptr != DefaultCpuExecutionProvider().get()) && !use_float16 && !only_enable_cuda;
+  bool enable_cuda = HasCudaEnvironment(min_cuda_architecture) && !is_weights_constant && !disable_cuda;
+  bool enable_rocm = (nullptr != DefaultRocmExecutionProvider().get()) && !is_weights_constant && !disable_rocm;
+  bool enable_cpu = (nullptr != DefaultCpuExecutionProvider().get()) && !use_float16 && !disable_cpu;
+  bool enable_dml = (nullptr != DefaultDmlExecutionProvider().get()) && !disable_dml;
 
   int head_size = hidden_size / number_of_heads;
-  if (enable_cpu || enable_cuda) {
+  if (enable_cpu || enable_cuda || enable_rocm || enable_dml) {
     OpTester tester("Attention", 1, onnxruntime::kMSDomain);
     tester.AddAttribute<int64_t>("num_heads", static_cast<int64_t>(number_of_heads));
     tester.AddAttribute<int64_t>("unidirectional", static_cast<int64_t>(is_unidirectional ? 1 : 0));
-
-    int32_t matrix_size;
-    int32_t output_hidden_size;
-    if (qkv_sizes.size() != 0) {
-      matrix_size = qkv_sizes[0] + qkv_sizes[1] + qkv_sizes[2];
-      std::vector<int64_t> sizes_attribute{qkv_sizes[0], qkv_sizes[1], qkv_sizes[2]};
-      tester.AddAttribute<std::vector<int64_t>>("qkv_hidden_sizes", sizes_attribute);
-      output_hidden_size = qkv_sizes[2];
-    } else {
-      matrix_size = 3 * hidden_size;
-      output_hidden_size = hidden_size;
+    tester.AddAttribute<int64_t>("past_present_share_buffer", static_cast<int64_t>(past_present_share_buffer ? 1 : 0));
+    tester.AddAttribute<float>("mask_filter_value", static_cast<float>(-10000.0f));
+    if (use_scale && !enable_rocm) {
+      tester.AddAttribute<float>("scale", static_cast<float>(1.f / sqrt(head_size)));
+    }
+    if (do_neox_rotary && !enable_rocm) {
+      tester.AddAttribute<int64_t>("do_rotary", static_cast<int64_t>(do_neox_rotary ? 1 : 0));
     }
 
+    int32_t qkv_hidden_size_sum;
+    int32_t v_hidden_size;
+    if (qkv_sizes.size() != 0) {
+      qkv_hidden_size_sum = qkv_sizes[0] + qkv_sizes[1] + qkv_sizes[2];
+      std::vector<int64_t> sizes_attribute{qkv_sizes[0], qkv_sizes[1], qkv_sizes[2]};
+      tester.AddAttribute<std::vector<int64_t>>("qkv_hidden_sizes", sizes_attribute);
+      v_hidden_size = qkv_sizes[2];
+    } else {
+      qkv_hidden_size_sum = 3 * hidden_size;
+      v_hidden_size = hidden_size;
+    }
+
+    int64_t total_sequence_length = past_sequence_length + kv_sequence_length;
+
     std::vector<int64_t> input_dims = {batch_size, sequence_length, input_hidden_size};
-    std::vector<int64_t> weights_dims = {input_hidden_size, matrix_size};
-    std::vector<int64_t> bias_dims = {matrix_size};
+    std::vector<int64_t> weights_dims = {input_hidden_size, qkv_hidden_size_sum};
+    std::vector<int64_t> bias_dims = {qkv_hidden_size_sum};
+    std::vector<int64_t> output_dims = {batch_size, sequence_length, v_hidden_size};
+    if (use_float16) {
+      tester.AddInput<MLFloat16>("input", input_dims, ToFloat16(input_data));
+      tester.AddInput<MLFloat16>("weight", weights_dims, ToFloat16(weights_data), is_weights_constant);
+      if (bias_data.size()) {
+        tester.AddInput<MLFloat16>("bias", bias_dims, ToFloat16(bias_data));
+      } else {
+        tester.AddOptionalInputEdge<MLFloat16>();
+      }
+      tester.AddOutput<MLFloat16>("output", output_dims, ToFloat16(output_data));
+    } else {
+      tester.AddInput<float>("input", input_dims, input_data);
+      tester.AddInput<float>("weight", weights_dims, weights_data, is_weights_constant);
+      if (bias_data.size()) {
+        tester.AddInput<float>("bias", bias_dims, bias_data);
+      } else {
+        tester.AddOptionalInputEdge<float>();
+      }
+      tester.AddOutput<float>("output", output_dims, output_data);
+    }
 
     std::vector<int64_t> mask_index_dims_1 = {batch_size};
     std::vector<int64_t> mask_index_dims_2 = {2 * batch_size};
-    std::vector<int64_t> mask_index_dims_3 = {batch_size, past_sequence_length + sequence_length};
+    std::vector<int64_t> mask_index_dims_3 = {batch_size, total_sequence_length};
     std::vector<int64_t> mask_index_dims_4 = {batch_size, 1};
-    std::vector<int64_t> mask_index_dims_5 = {batch_size, sequence_length, past_sequence_length + sequence_length};
+    std::vector<int64_t> mask_index_dims_5 = {batch_size, sequence_length, total_sequence_length};
     std::vector<int64_t> mask_index_dims_6 = {batch_size, 1, max_sequence_length, max_sequence_length};
     std::vector<int64_t> mask_index_dims;
-    switch (mask_index_type) {
-      case kMaskIndexEnd:
+    switch (mask_type) {
+      case AttentionMaskType::MASK_1D_KEY_SEQ_LEN:
         mask_index_dims = mask_index_dims_1;
         break;
-      case kMaskIndexEndAndStart:
+      case AttentionMaskType::MASK_1D_END_START:
         mask_index_dims = mask_index_dims_2;
         break;
-      case kMaskRaw:
+      case AttentionMaskType::MASK_2D_KEY_PADDING:
         mask_index_dims = mask_index_dims_3;
         break;
-      case kMaskDummy:
+      case AttentionMaskType::MASK_2D_DUMMY:
         mask_index_dims = mask_index_dims_4;
         break;
-      case kMask3D:
+      case AttentionMaskType::MASK_3D_ATTENTION:
         mask_index_dims = mask_index_dims_5;
         break;
-      case kMask4D:
+      case AttentionMaskType::MASK_4D_MEGATRON:
         mask_index_dims = mask_index_dims_6;
         break;
       default:
         assert(0);  // shall not reach here.
         break;
     }
-
-    std::vector<int64_t> past_dims = {2, batch_size, number_of_heads, past_sequence_length, head_size};
-    std::vector<int64_t> present_dims = {2, batch_size, number_of_heads, past_sequence_length + sequence_length, head_size};
-    std::vector<int64_t> output_dims = {batch_size, sequence_length, output_hidden_size};
-
-    if (use_float16) {
-      tester.AddInput<MLFloat16>("input", input_dims, ToFloat16(input_data));
-      tester.AddInput<MLFloat16>("weight", weights_dims, ToFloat16(weights_data), is_weights_constant);
-      tester.AddInput<MLFloat16>("bias", bias_dims, ToFloat16(bias_data));
-      tester.AddOutput<MLFloat16>("output", output_dims, ToFloat16(output_data));
-    } else {
-      tester.AddInput<float>("input", input_dims, input_data);
-      tester.AddInput<float>("weight", weights_dims, weights_data, is_weights_constant);
-      tester.AddInput<float>("bias", bias_dims, bias_data);
-      tester.AddOutput<float>("output", output_dims, output_data);
-    }
-
     if (mask_index_data.size() > 0) {  // mask index is optional.
       tester.AddInput<int32_t>("mask_index", mask_index_dims, mask_index_data);
     } else {
@@ -124,25 +164,73 @@ static void RunAttentionTest(
     }
 
     if (use_past_state) {
+      if (!past_present_share_buffer) {
+        std::vector<int64_t> past_dims = {2, batch_size, number_of_heads, past_sequence_length, head_size};
+        std::vector<int64_t> present_dims = {2, batch_size, number_of_heads, total_sequence_length, head_size};
+        if (use_float16) {
+          if (past_sequence_length > 0) {
+            tester.AddInput<MLFloat16>("past", past_dims, ToFloat16(*past_data));
+          }
+          tester.AddOutput<MLFloat16>("present", present_dims, ToFloat16(*present_data));
+        } else {
+          if (past_sequence_length > 0) {
+            tester.AddInput<float>("past", past_dims, *past_data);
+          }
+          tester.AddOutput<float>("present", present_dims, *present_data);
+        }
+      } else {  // past_present_share_buffer
+        std::vector<int64_t> cache_dims = {2, batch_size, number_of_heads, max_sequence_length, head_size};
+        if (use_float16) {
+          auto past_cache = ReorderToKvCache(ToFloat16(*past_data).data(), batch_size, past_sequence_length,
+                                             max_sequence_length, number_of_heads, head_size);
+          auto present_cache = ReorderToKvCache(ToFloat16(*present_data).data(), batch_size, static_cast<int>(total_sequence_length),
+                                                max_sequence_length, number_of_heads, head_size);
+
+          tester.AddInput<MLFloat16>("past", cache_dims, past_cache);
+          tester.AddOutput<MLFloat16>("present", cache_dims, present_cache);
+        } else {
+          auto past_cache = ReorderToKvCache(past_data->data(), batch_size, past_sequence_length,
+                                             max_sequence_length, number_of_heads, head_size);
+          auto present_cache = ReorderToKvCache(present_data->data(), batch_size, static_cast<int>(total_sequence_length),
+                                                max_sequence_length, number_of_heads, head_size);
+          tester.AddInput<float>("past", cache_dims, past_cache);
+          tester.AddOutput<float>("present", cache_dims, present_cache);
+        }
+      }
+    } else {
       if (use_float16) {
-        if (past_sequence_length > 0) {
-          tester.AddInput<MLFloat16>("past", past_dims, ToFloat16(*past_data));
-        }
-        tester.AddOutput<MLFloat16>("present", present_dims, ToFloat16(*present_data));
+        tester.AddOptionalInputEdge<MLFloat16>();
       } else {
-        if (past_sequence_length > 0) {
-          tester.AddInput<float>("past", past_dims, *past_data);
-        }
-        tester.AddOutput<float>("present", present_dims, *present_data);
+        tester.AddOptionalInputEdge<float>();
       }
     }
 
-    if (extra_add_data.size() > 0) {
-      if (!use_past_state) {
+    std::vector<int64_t> attention_bias_data_dims = {batch_size, number_of_heads, sequence_length, sequence_length};
+    if (attention_bias_data.size() > 0) {
+      if (use_float16) {
+        tester.AddInput<MLFloat16>("attention_bias", attention_bias_data_dims, ToFloat16(attention_bias_data));
+      } else {
+        tester.AddInput<float>("attention_bias", attention_bias_data_dims, attention_bias_data);
+      }
+    } else {
+      if (use_float16) {
+        tester.AddOptionalInputEdge<MLFloat16>();
+      } else {
         tester.AddOptionalInputEdge<float>();
       }
-      std::vector<int64_t> extra_add_data_dims = {batch_size, number_of_heads, sequence_length, sequence_length};
-      tester.AddInput<float>("extra_add_qk", extra_add_data_dims, extra_add_data);
+    }
+
+    if (past_present_share_buffer) {
+      std::vector<int32_t> arr_past_sequence_len(1, past_sequence_length);
+      tester.AddInput<int32_t>("past_sequence_length", {1}, arr_past_sequence_len);
+    } else {
+      tester.AddOptionalInputEdge<int32_t>();
+    }
+
+    if (use_float16) {
+      tester.SetOutputTolerance(0.005f);
+    } else {
+      tester.SetOutputTolerance(0.001f, 0.001f);
     }
 
     if (enable_cuda) {
@@ -151,9 +239,30 @@ static void RunAttentionTest(
       tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
     }
 
+    if (enable_rocm) {
+      std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
+      execution_providers.push_back(DefaultRocmExecutionProvider());
+      tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
+    }
+
+    if (enable_rocm) {
+      std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
+      execution_providers.push_back(DefaultRocmExecutionProvider(/*test_tunable_op=*/true));
+      tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
+    }
+
     if (enable_cpu) {
       std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
       execution_providers.push_back(DefaultCpuExecutionProvider());
+      tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
+    }
+
+    if (enable_dml) {
+      std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
+      execution_providers.push_back(DefaultDmlExecutionProvider());
+      if (use_float16) {
+        tester.SetOutputTolerance(0.02f);
+      }
       tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
     }
   }
@@ -163,7 +272,7 @@ static void RunAttentionTest(
     const std::vector<float>& input_data,         // input:      [batch_size, sequence_length, hidden_size]
     const std::vector<float>& weights_data,       // weights:    [hidden_size, 3 * hidden_size]
     const std::vector<float>& bias_data,          // bias:       [3 * hidden_size]
-    const std::vector<int32_t>& mask_index_data,  // mask_index: [batch_size] or [batch_size, past_sequence_length + sequence_length] or empty
+    const std::vector<int32_t>& mask_index_data,  // mask_index
     const std::vector<float>& output_data,        // output:     [batch_size, sequence_length, hidden_size]
     int batch_size,
     int sequence_length,
@@ -175,23 +284,31 @@ static void RunAttentionTest(
     int past_sequence_length = 0,
     const std::vector<float>* past_data = nullptr,
     const std::vector<float>* present_data = nullptr,
-    MaskIndexType mask_index_type = kMaskIndexEnd,
+    AttentionMaskType mask_type = AttentionMaskType::MASK_1D_KEY_SEQ_LEN,
     int input_hidden_size = 0,
     int max_sequence_length = 0,
-    bool only_enable_cuda = false,
-    bool only_enable_cpu = false,
+    const bool disable_cpu = false,
+    const bool disable_cuda = false,
+    const bool disable_rocm = false,
+    const bool disable_dml = false,
     const std::vector<int32_t> qkv_sizes = {},
-    const std::vector<float>& extra_add_data = {}) {
-    RunAttentionTest(input_data, weights_data, false, bias_data, mask_index_data, output_data,
-                     batch_size, sequence_length, hidden_size, number_of_heads,
-                     use_float16, is_unidirectional, use_past_state, past_sequence_length,
-                     past_data, present_data, mask_index_type, input_hidden_size, max_sequence_length,
-                     only_enable_cuda, only_enable_cpu, qkv_sizes, extra_add_data);
-    RunAttentionTest(input_data, weights_data, true, bias_data, mask_index_data, output_data,
-                     batch_size, sequence_length, hidden_size, number_of_heads,
-                     use_float16, is_unidirectional, use_past_state, past_sequence_length,
-                     past_data, present_data, mask_index_type, input_hidden_size, max_sequence_length,
-                     only_enable_cuda, only_enable_cpu, qkv_sizes, extra_add_data);
+    const std::vector<float>& attention_bias_data = {},
+    int kv_sequence_length = 0,
+    bool past_present_share_buffer = false,
+    bool use_scale = false,
+    bool do_neox_rotary = false) {
+  RunAttentionTest(input_data, weights_data, false, bias_data, mask_index_data, output_data,
+                   batch_size, sequence_length, hidden_size, number_of_heads,
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length,
+                   past_data, present_data, mask_type, input_hidden_size, max_sequence_length,
+                   disable_cpu, disable_cuda, disable_rocm, disable_dml, qkv_sizes, attention_bias_data,
+                   kv_sequence_length, past_present_share_buffer, use_scale, do_neox_rotary);
+  RunAttentionTest(input_data, weights_data, true, bias_data, mask_index_data, output_data,
+                   batch_size, sequence_length, hidden_size, number_of_heads,
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length,
+                   past_data, present_data, mask_type, input_hidden_size, max_sequence_length,
+                   disable_cpu, disable_cuda, disable_rocm, disable_dml, qkv_sizes, attention_bias_data,
+                   kv_sequence_length, past_present_share_buffer, use_scale, do_neox_rotary);
 }
 
 TEST(AttentionTest, AttentionBatch1) {
@@ -228,7 +345,7 @@ TEST(AttentionTest, AttentionBatch1WithQKVAttr1) {
   int sequence_length = 2;
   int hidden_size = 4;
   int number_of_heads = 2;
-  
+
   std::vector<float> input_data = {
       0.8f, -0.5f, 0.0f, 1.f,
       0.5f, 0.2f, 0.3f, -0.6f};
@@ -244,8 +361,7 @@ TEST(AttentionTest, AttentionBatch1WithQKVAttr1) {
       0.2f, 0.1f, 0.4f, 1.6f, 2.4f, 3.3f, 2.1f, 4.2f, 8.4f, 0.0f, 2.1f, 3.2f,
 
       0.3f, 0.2f, 4.0f, 2.2f, 2.4f, 3.3f, 2.1f, 4.2f, 0.5f, 0.1f, 0.4f, 1.6f,
-      0.4f, 0.8f, 0.9f, 0.1f
-  };
+      0.4f, 0.8f, 0.9f, 0.1f};
 
   std::vector<float> bias_data = {
       -0.5f, 0.6f, 1.2f, 2.1f, 0.5f, 0.7f,
@@ -258,10 +374,11 @@ TEST(AttentionTest, AttentionBatch1WithQKVAttr1) {
       3.1967618465423584f, 0.51903456449508667f, 0.63051539659500122f, 2.9394614696502686f,
       0.65332180261611938f, 1.000949501991272f, 0.74175024032592773f, 2.8231701850891113f};
 
+  constexpr bool disable_rocm = true;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
-                   batch_size, sequence_length, hidden_size, number_of_heads, 
-                   false, false, false, 0, nullptr, nullptr, kMaskIndexEnd, 0,
-                   0, false, true, qkv_sizes);
+                   batch_size, sequence_length, hidden_size, number_of_heads,
+                   false, false, false, 0, nullptr, nullptr, AttentionMaskType::MASK_1D_KEY_SEQ_LEN, 0,
+                   0, false, false, disable_rocm, false, qkv_sizes);
 }
 
 TEST(AttentionTest, AttentionBatch1WithQKVAttr2) {
@@ -274,7 +391,7 @@ TEST(AttentionTest, AttentionBatch1WithQKVAttr2) {
       -0.031707365f, 0.053643607f, 0.057394292f, -0.019800574f, 0.075466447f, -0.0034214978f, 0.012995008f, -0.019587509f};
 
   std::vector<int32_t> qkv_sizes = {
-     6, 6, 2};
+      6, 6, 2};
 
   std::vector<float> weight_data = {
       0.1f, -0.2f, 0.3f, 1.0f, 1.1f, 0.3f, 0.5f, 0.2f, 0.3f, -0.6f, 1.5f, 2.0f,
@@ -295,13 +412,14 @@ TEST(AttentionTest, AttentionBatch1WithQKVAttr2) {
   std::vector<float> output_data = {
       0.64932525157928467f, 0.79390722513198853f, 0.64932847023010254f, 0.79375863075256348f};
 
+  constexpr bool disable_rocm = true;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   false, false, false, 0, nullptr, nullptr, kMaskIndexEnd, 0,
-                   0, false, true, qkv_sizes);
+                   false, false, false, 0, nullptr, nullptr, AttentionMaskType::MASK_1D_KEY_SEQ_LEN, 0,
+                   0, false, false, disable_rocm, false, qkv_sizes);
 }
 
-TEST(AttentionTest, AttentionBatch1ExtraAdd) {
+TEST(AttentionTest, AttentionBatch1AttentionBias) {
   int batch_size = 1;
   int sequence_length = 2;
   int hidden_size = 4;
@@ -325,20 +443,24 @@ TEST(AttentionTest, AttentionBatch1ExtraAdd) {
 
   std::vector<int32_t> mask_index_data = {2L};
 
-  std::vector<float> extra_add_qk = {
+  std::vector<float> attention_bias = {
       0.2f, -0.1f, 0.4f, 2.5f, 1.6f, -1.1f, 0.4f, -2.5f};
 
   std::vector<float> output_data = {
       4.066014289855957f, 0.068997815251350403f, 4.25f, 5.6499996185302734f,
       -1.8799558877944946f, 0.32488855719566345f, 4.25f, 5.6499996185302734f};
 
+  constexpr bool disable_cpu = false;
+  constexpr bool disable_cuda = false;
+  constexpr bool disable_rocm = false;
+  constexpr bool disable_dml = false;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   false, false, false, 0, nullptr, nullptr, kMaskIndexEnd, 0,
-                   0, true, true, qkv_sizes, extra_add_qk);
+                   false, false, false, 0, nullptr, nullptr, AttentionMaskType::MASK_1D_KEY_SEQ_LEN, 0,
+                   0, disable_cpu, disable_cuda, disable_rocm, disable_dml, qkv_sizes, attention_bias);
 }
 
-TEST(AttentionTest, AttentionBatch2ExtraAdd) {
+TEST(AttentionTest, AttentionBatch2AttentionBias) {
   int batch_size = 2;
   int sequence_length = 2;
   int hidden_size = 4;
@@ -364,7 +486,7 @@ TEST(AttentionTest, AttentionBatch2ExtraAdd) {
 
   std::vector<int32_t> mask_index_data = {2L, 2L};
 
-  std::vector<float> extra_add_qk = {
+  std::vector<float> attention_bias = {
       0.2f, -0.1f, 0.4f, 2.5f, 1.6f, -1.1f, 0.4f, -2.5f,
       0.2f, -0.1f, 0.4f, 2.5f, 1.6f, -1.1f, 0.4f, -2.5f};
 
@@ -374,10 +496,14 @@ TEST(AttentionTest, AttentionBatch2ExtraAdd) {
       4.066014289855957f, 0.068997815251350403f, 4.25f, 5.6499996185302734f,
       -1.8799558877944946f, 0.32488855719566345f, 4.25f, 5.6499996185302734f};
 
+  constexpr bool disable_cpu = false;
+  constexpr bool disable_cuda = false;
+  constexpr bool disable_rocm = false;
+  constexpr bool disable_dml = false;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   false, false, false, 0, nullptr, nullptr, kMaskIndexEnd, 0,
-                   0, true, true, qkv_sizes, extra_add_qk);
+                   false, false, false, 0, nullptr, nullptr, AttentionMaskType::MASK_1D_KEY_SEQ_LEN, 0,
+                   0, disable_cpu, disable_cuda, disable_rocm, disable_dml, qkv_sizes, attention_bias);
 }
 
 TEST(AttentionTest, AttentionBatch1_Float16) {
@@ -620,7 +746,7 @@ TEST(AttentionTest, AttentionUnidirectional) {
                    batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional);
 }
 
-TEST(AttentionTest, AttentionEmptyPastState) {
+void RawAttentionEmptyPastState(bool past_present_share_buffer) {
   int batch_size = 1;
   int sequence_length = 2;
   int hidden_size = 4;
@@ -712,12 +838,95 @@ TEST(AttentionTest, AttentionEmptyPastState) {
   bool use_past_state = true;
   int past_sequence_length = 0;
 
-  RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
-                   batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
-                   use_past_state, past_sequence_length, &past_data, &present_data);
+  if (!past_present_share_buffer) {
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data);
+  } else {
+    // TODO: Unskip when fixed #41968513
+    // DML doesn't support past_present_share_buffer for Attention yet
+    constexpr bool disable_dml = true;
+
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data,
+                     AttentionMaskType::MASK_1D_KEY_SEQ_LEN, 0, sequence_length, true, false, true, disable_dml, {}, {}, 0,
+                     true);
+  }
 }
 
-TEST(AttentionTest, AttentionPastStateBatch1) {
+TEST(AttentionTest, Causal_EmptyPastState) {
+  int batch_size = 1;
+  int sequence_length = 2;
+  int hidden_size = 64;
+  int number_of_heads = 2;
+
+  std::vector<float> weight_data;
+  std::vector<float> bias_data;
+  GetAttentionWeight(weight_data);
+  GetAttentionBias(bias_data);
+
+  // No mask_index
+  std::vector<int32_t> mask_index_data = {};
+
+  std::vector<float> input_data;
+  std::vector<float> output_data;
+  std::vector<float> present_data;
+  GetCausal_EmptyPastState(input_data, output_data, present_data);
+
+  std::vector<float> past_data = {};
+
+  bool is_unidirectional = true;
+  bool use_past_state = true;
+  int past_sequence_length = 0;
+  bool use_float16 = true;
+
+  // Unfused kernel
+  {
+    ScopedEnvironmentVariables scoped_env_vars{
+        EnvVarMap{
+            {onnxruntime::contrib::attention::kDisableTrtFlashAttention, "1"},
+            {onnxruntime::contrib::attention::kEnableFusedCausalAttention, "0"},
+            {onnxruntime::contrib::attention::kDisableFusedSelfAttention, "1"}}};
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, use_float16, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data);
+  }
+
+  // Fused kernel
+  {
+    ScopedEnvironmentVariables scoped_env_vars{
+        EnvVarMap{
+            {onnxruntime::contrib::attention::kDisableTrtFlashAttention, "1"},
+            {onnxruntime::contrib::attention::kEnableFusedCausalAttention, "1"},
+            {onnxruntime::contrib::attention::kDisableFusedSelfAttention, "0"}}};
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, use_float16, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data);
+  }
+
+  // Fused kernel (fall back to regular fmha since head_size <=64 and sequence_length <= 128)
+  {
+    ScopedEnvironmentVariables scoped_env_vars{
+        EnvVarMap{
+            {onnxruntime::contrib::attention::kDisableTrtFlashAttention, "0"},
+            {onnxruntime::contrib::attention::kEnableFusedCausalAttention, "1"},
+            {onnxruntime::contrib::attention::kDisableFusedSelfAttention, "0"}}};
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, use_float16, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data);
+  }
+}
+
+TEST(AttentionTest, AttentionEmptyPastState) {
+  RawAttentionEmptyPastState(false);
+}
+
+TEST(AttentionTest, AttentionEmptyPastState_SharedPastPresent) {
+  RawAttentionEmptyPastState(true);
+}
+
+void RawAttentionPastStateBatch1(bool past_present_share_buffer) {
   int batch_size = 1;
   int sequence_length = 1;
   int hidden_size = 4;
@@ -811,12 +1020,32 @@ TEST(AttentionTest, AttentionPastStateBatch1) {
   bool use_past_state = true;
   int past_sequence_length = 3;
 
-  RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
-                   batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
-                   use_past_state, past_sequence_length, &past_data, &present_data);
+  if (!past_present_share_buffer) {
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data);
+  } else {
+    // TODO: Unskip when fixed #41968513
+    // DML doesn't support past_present_share_buffer for Attention yet
+    constexpr bool disable_dml = true;
+
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data,
+                     AttentionMaskType::MASK_1D_KEY_SEQ_LEN, 0, past_sequence_length + sequence_length + 4,
+                     true, false, true, disable_dml, {}, {}, 0, true);
+  }
 }
 
-TEST(AttentionTest, AttentionPastStateBatch2) {
+TEST(AttentionTest, AttentionPastStateBatch1) {
+  RawAttentionPastStateBatch1(false);
+}
+
+TEST(AttentionTest, AttentionPastStateBatch1_SharedPastPresent) {
+  RawAttentionPastStateBatch1(true);
+}
+
+void RawAttentionPastStateBatch2(bool past_present_share_buffer) {
   int batch_size = 2;
   int sequence_length = 1;
   int hidden_size = 4;
@@ -901,25 +1130,55 @@ TEST(AttentionTest, AttentionPastStateBatch2) {
       0.26993567f, 0.23553593f, 0.43190649f, 0.086044826f};
 
   std::vector<float> past_data = {
-      0.42028648f, 0.55855948f, 0.044569403f, 0.76525789f, 0.13962431f, 0.40977913f, 0.36911047f, 0.83399564f, 0.36905321f, 0.91414654f, 0.17300875f, 0.78793788f,
-      0.10279467f, 0.80501258f, 0.089550517f, 0.85371113f, 0.61801594f, 0.91222942f, 0.88626182f, 0.069776468f, 0.10591964f, 0.84836882f, 0.83520192f, 0.0098680854f,
-      0.3113814f, 0.63999802f, 0.28603253f, 0.98899829f, 0.044405211f, 0.95105386f, 0.81278932f, 0.63969064f, 0.14494057f, 0.11349615f, 0.87086016f, 0.20983537f,
-      0.35107401f, 0.90144604f, 0.68950737f, 0.18928574f, 0.18029204f, 0.074517399f, 0.70763874f, 0.48440042f, 0.58114725f, 0.1048766f, 0.73694098f, 0.17766342f};
+      0.42028648f, 0.55855948f, 0.044569403f, 0.76525789f, 0.13962431f, 0.40977913f,
+      0.36911047f, 0.83399564f, 0.36905321f, 0.91414654f, 0.17300875f, 0.78793788f,
+      0.10279467f, 0.80501258f, 0.089550517f, 0.85371113f, 0.61801594f, 0.91222942f,
+      0.88626182f, 0.069776468f, 0.10591964f, 0.84836882f, 0.83520192f, 0.0098680854f,
+      0.3113814f, 0.63999802f, 0.28603253f, 0.98899829f, 0.044405211f, 0.95105386f,
+      0.81278932f, 0.63969064f, 0.14494057f, 0.11349615f, 0.87086016f, 0.20983537f,
+      0.35107401f, 0.90144604f, 0.68950737f, 0.18928574f, 0.18029204f, 0.074517399f,
+      0.70763874f, 0.48440042f, 0.58114725f, 0.1048766f, 0.73694098f, 0.17766342f};
 
   std::vector<float> present_data = {
-      0.42028648f, 0.55855948f, 0.044569403f, 0.76525789f, 0.13962431f, 0.40977913f, -0.22849128f, -0.022080801f, 0.36911047f, 0.83399564f, 0.36905321f, 0.91414654f, 0.17300875f, 0.78793788f, -0.4449589f, -0.17704415f, 0.10279467f, 0.80501258f, 0.089550517f, 0.85371113f, 0.61801594f, 0.91222942f, -0.2994619f, -0.14412443f, 0.88626182f, 0.069776468f, 0.10591964f, 0.84836882f, 0.83520192f, 0.0098680854f, -0.33421949f, -0.18547727f,
-      0.3113814f, 0.63999802f, 0.28603253f, 0.98899829f, 0.044405211f, 0.95105386f, -0.033968594f, -0.034833729f, 0.81278932f, 0.63969064f, 0.14494057f, 0.11349615f, 0.87086016f, 0.20983537f, 0.045759238f, -0.26863033f, 0.35107401f, 0.90144604f, 0.68950737f, 0.18928574f, 0.18029204f, 0.074517399f, -0.033201858f, -0.10592631f, 0.70763874f, 0.48440042f, 0.58114725f, 0.1048766f, 0.73694098f, 0.17766342f, -0.054369561f, -0.24562015f};
+      0.42028648f, 0.55855948f, 0.044569403f, 0.76525789f, 0.13962431f, 0.40977913f, -0.22849128f, -0.022080801f,
+      0.36911047f, 0.83399564f, 0.36905321f, 0.91414654f, 0.17300875f, 0.78793788f, -0.4449589f, -0.17704415f,
+      0.10279467f, 0.80501258f, 0.089550517f, 0.85371113f, 0.61801594f, 0.91222942f, -0.2994619f, -0.14412443f,
+      0.88626182f, 0.069776468f, 0.10591964f, 0.84836882f, 0.83520192f, 0.0098680854f, -0.33421949f, -0.18547727f,
+      0.3113814f, 0.63999802f, 0.28603253f, 0.98899829f, 0.044405211f, 0.95105386f, -0.033968594f, -0.034833729f,
+      0.81278932f, 0.63969064f, 0.14494057f, 0.11349615f, 0.87086016f, 0.20983537f, 0.045759238f, -0.26863033f,
+      0.35107401f, 0.90144604f, 0.68950737f, 0.18928574f, 0.18029204f, 0.074517399f, -0.033201858f, -0.10592631f,
+      0.70763874f, 0.48440042f, 0.58114725f, 0.1048766f, 0.73694098f, 0.17766342f, -0.054369561f, -0.24562015f};
 
   bool is_unidirectional = true;
   bool use_past_state = true;
   int past_sequence_length = 3;
 
-  RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
-                   batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
-                   use_past_state, past_sequence_length, &past_data, &present_data);
+  if (!past_present_share_buffer) {
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data);
+  } else {
+    // TODO: Unskip when fixed #41968513
+    // DML doesn't support past_present_share_buffer for Attention yet
+    constexpr bool disable_dml = true;
+
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data,
+                     AttentionMaskType::MASK_1D_KEY_SEQ_LEN, 0, past_sequence_length + sequence_length,
+                     true, false, true, disable_dml, {}, {}, 0, true);
+  }
 }
 
-TEST(AttentionTest, AttentionPastStateBatch2WithPadding) {
+TEST(AttentionTest, AttentionPastStateBatch2) {
+  RawAttentionPastStateBatch2(false);
+}
+
+TEST(AttentionTest, AttentionPastStateBatch2_SharedPastPresent) {
+  RawAttentionPastStateBatch2(true);
+}
+
+void RawAttentionPastStateBatch2WithPadding(bool past_present_share_buffer) {
   int batch_size = 2;
   int sequence_length = 1;
   int hidden_size = 4;
@@ -1016,9 +1275,32 @@ TEST(AttentionTest, AttentionPastStateBatch2WithPadding) {
   bool is_unidirectional = true;
   bool use_past_state = true;
   int past_sequence_length = 3;
-  RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
-                   batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
-                   use_past_state, past_sequence_length, &past_data, &present_data, kMaskIndexEndAndStart);
+
+  if (!past_present_share_buffer) {
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data,
+                     AttentionMaskType::MASK_1D_END_START);
+  } else {
+    // TODO: Unskip when fixed #41968513
+    // DML doesn't support past_present_share_buffer for Attention yet
+    constexpr bool disable_dml = true;
+
+    RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                     batch_size, sequence_length, hidden_size, number_of_heads, false, is_unidirectional,
+                     use_past_state, past_sequence_length, &past_data, &present_data,
+                     AttentionMaskType::MASK_1D_END_START,
+                     0, past_sequence_length + sequence_length + 4,
+                     true, false, true, disable_dml, {}, {}, 0, true);
+  }
+}
+
+TEST(AttentionTest, AttentionPastStateBatch2WithPadding) {
+  RawAttentionPastStateBatch2WithPadding(false);
+}
+
+TEST(AttentionTest, AttentionPastStateBatch2WithPadding_SharedPastPresent) {
+  RawAttentionPastStateBatch2WithPadding(true);
 }
 
 TEST(AttentionTest, AttentionBatch2MaskIndex2) {
@@ -1058,7 +1340,8 @@ TEST(AttentionTest, AttentionBatch2MaskIndex2) {
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskIndexEndAndStart);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_1D_END_START);
 }
 
 TEST(AttentionTest, AttentionRightPaddingMaskIndex2) {
@@ -1095,7 +1378,8 @@ TEST(AttentionTest, AttentionRightPaddingMaskIndex2) {
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskIndexEndAndStart);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_1D_END_START);
 }
 
 TEST(AttentionTest, AttentionLeftPaddingMaskIndex2) {
@@ -1132,7 +1416,8 @@ TEST(AttentionTest, AttentionLeftPaddingMaskIndex2) {
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskIndexEndAndStart);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_1D_END_START);
 }
 
 TEST(AttentionTest, AttentionBatch2LeftPaddingMaskIndex2) {
@@ -1173,7 +1458,8 @@ TEST(AttentionTest, AttentionBatch2LeftPaddingMaskIndex2) {
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskIndexEndAndStart);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_1D_END_START);
 }
 
 TEST(AttentionTest, Attention3DMask) {
@@ -1218,7 +1504,8 @@ TEST(AttentionTest, Attention3DMask) {
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMask3D);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_3D_ATTENTION);
 }
 
 TEST(AttentionTest, AttentionBatch2AttentionMask) {
@@ -1259,7 +1546,8 @@ TEST(AttentionTest, AttentionBatch2AttentionMask) {
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskRaw);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_2D_KEY_PADDING);
 }
 
 TEST(AttentionTest, AttentionUnidirectional3DMask) {
@@ -1291,7 +1579,7 @@ TEST(AttentionTest, AttentionUnidirectional3DMask) {
       1, 1};
 
   std::vector<float> output_data = {
-      3.0146f, 0.1142f, 3.9834f, 5.3394f,
+      -4.09f, 0.42f, -0.11f, 0.57f,
       8.69f, -0.13f, 4.25f, 5.65f,
       8.69f, -0.13f, 4.25f, 5.65f,
       3.96967912f, 0.07314367f, 4.25f, 5.65f};
@@ -1304,7 +1592,8 @@ TEST(AttentionTest, AttentionUnidirectional3DMask) {
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMask3D);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_3D_ATTENTION);
 }
 
 TEST(AttentionTest, AttentionUnidirectionalAttentionMask) {
@@ -1332,7 +1621,7 @@ TEST(AttentionTest, AttentionUnidirectionalAttentionMask) {
   std::vector<int32_t> mask_index_data = {0, 1, 1, 1};
 
   std::vector<float> output_data = {
-      3.0146f, 0.1142f, 3.9834f, 5.3394f,
+      -4.09f, 0.42f, -0.11f, 0.57f,
       8.69f, -0.13f, 4.25f, 5.65f,
       8.69f, -0.13f, 4.25f, 5.65f,
       3.96967912f, 0.07314367f, 4.25f, 5.65f};
@@ -1345,7 +1634,87 @@ TEST(AttentionTest, AttentionUnidirectionalAttentionMask) {
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskRaw);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_2D_KEY_PADDING);
+}
+
+TEST(AttentionTest, AttentionWithNormFactor) {
+  int batch_size = 2;
+  int sequence_length = 2;
+  int hidden_size = 4;
+  int number_of_heads = 2;
+
+  std::vector<float> input_data = {
+      0.5f, 0.2f, 0.3f, -0.6f,
+      0.8f, -0.5f, 0.0f, 1.f,
+      0.8f, -0.5f, 0.0f, 1.f,
+      0.5f, 0.2f, 0.3f, -0.6f};
+
+  std::vector<float> weight_data = {
+      0.1f, -0.2f, 0.3f, 1.0f, 1.1f, 0.3f, 0.5f, 0.2f, 0.3f, -0.6f, 1.5f, 2.0f,
+      0.5f, 0.1f, 0.4f, 1.6f, 1.0f, 2.0f, 0.4f, 0.8f, 0.9f, 0.1f, -1.3f, 0.7f,
+      0.3f, 0.2f, 4.0f, 2.2f, 1.6f, 1.1f, 0.7f, 0.2f, 0.4f, 1.0f, 1.2f, 0.5f,
+      0.2f, 0.1f, 0.4f, 1.6f, 2.4f, 3.3f, 2.1f, 4.2f, 8.4f, 0.0f, 2.1f, 3.2f};
+
+  std::vector<float> bias_data = {
+      -0.5f, 0.6f, 1.2f, 2.1f, 0.5f, 0.7f, 0.2f, 1.2f, 0.5f, 0.4f, 0.3f, 1.2f};
+
+  // Test mask start position > 0.
+  std::vector<int32_t> mask_index_data = {0, 1, 1, 1};
+
+  std::vector<float> output_data = {
+      -4.09f, 0.42f, -0.11f, 0.57f,
+      8.69f, -0.13f, 4.25f, 5.65f,
+      8.69f, -0.13f, 4.25f, 5.65f,
+      3.96967912f, 0.07314367f, 4.25f, 5.65f};
+
+  bool use_float16 = false;
+  bool is_unidirectional = true;
+  bool use_past_state = false;
+  int past_sequence_length = 0;
+  const std::vector<float>* past_data = nullptr;
+  const std::vector<float>* present_data = nullptr;
+  RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                   batch_size, sequence_length, hidden_size, number_of_heads,
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_2D_KEY_PADDING, 0 /*input_hidden_size*/, 0 /*max_sequence_length*/,
+                   false /*disable_cpu*/, false /*disable_cuda*/, true /*disable_rocm*/, false /*disable_dml*/, {} /*qkv_sizes*/,
+                   {} /*attention_bias_data*/, 0 /*kv_sequence_length*/, false /*past_present_share_buffer*/,
+                   true /*use_scale*/);
+}
+
+TEST(AttentionTest, AttentionWithNeoXRotaryEmbedding) {
+  int batch_size = 2;
+  int sequence_length = 2;
+  int hidden_size = 64;
+  int number_of_heads = 1;
+
+  std::vector<float> input_data = {};
+  std::vector<float> weight_data = {};
+  std::vector<float> bias_data = {};
+  std::vector<int32_t> mask_index_data = {1, 1, 1, 1};
+  std::vector<float> output_data = {};
+
+  GetAttentionDataWithNeoXRotaryEmbedding(input_data, weight_data, bias_data, output_data);
+
+  bool use_float16 = true;
+  bool is_unidirectional = true;
+  bool use_past_state = false;
+  int past_sequence_length = 0;
+  const std::vector<float>* past_data = nullptr;
+  const std::vector<float>* present_data = nullptr;
+
+  // TODO: Unskip when fixed #41968513
+  // DML doesn't support do_rotary for Attention yet
+  constexpr bool disable_dml = true;
+
+  RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
+                   batch_size, sequence_length, hidden_size, number_of_heads,
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_2D_KEY_PADDING, 0 /*input_hidden_size*/, 0 /*max_sequence_length*/,
+                   true /*disable_cpu*/, false /*disable_cuda*/, true /*disable_rocm*/, disable_dml, {} /*qkv_sizes*/,
+                   {} /*attention_bias_data*/, 0 /*kv_sequence_length*/, false /*past_present_share_buffer*/,
+                   true /*use_scale*/, true /*use_neox_rotary_embedding*/);
 }
 
 TEST(AttentionTest, AttentionMask1DEndNoWord) {
@@ -1387,7 +1756,8 @@ TEST(AttentionTest, AttentionMask1DEndNoWord) {
 
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskIndexEnd);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_1D_KEY_SEQ_LEN);
 }
 
 TEST(AttentionTest, AttentionMask1DNoWord) {
@@ -1429,7 +1799,8 @@ TEST(AttentionTest, AttentionMask1DNoWord) {
 
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskIndexEndAndStart);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_1D_END_START);
 }
 
 TEST(AttentionTest, AttentionMask2DNoWord) {
@@ -1471,7 +1842,8 @@ TEST(AttentionTest, AttentionMask2DNoWord) {
 
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskRaw);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_2D_KEY_PADDING);
 }
 
 TEST(AttentionTest, AttentionMask3DNoWord) {
@@ -1513,7 +1885,8 @@ TEST(AttentionTest, AttentionMask3DNoWord) {
 
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMask3D);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_3D_ATTENTION);
 }
 
 TEST(AttentionTest, AttentionDummyMask2D) {
@@ -1554,7 +1927,8 @@ TEST(AttentionTest, AttentionDummyMask2D) {
 
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskDummy);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_2D_DUMMY);
 }
 
 TEST(AttentionTest, Attention4DMask) {
@@ -1593,14 +1967,14 @@ TEST(AttentionTest, Attention4DMask) {
   int past_sequence_length = 0;
   int input_hidden_size = 0;
   int max_sequence_length = 4;
-  bool only_enable_cuda = true;  // only support 4D mask in cuda
+  bool disable_cpu = true;  // 4D mask not support in CPU kernel
   const std::vector<float>* past_data = nullptr;
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
                    use_float16, is_unidirectional, use_past_state, past_sequence_length,
-                   past_data, present_data, kMask4D, input_hidden_size, max_sequence_length,
-                   only_enable_cuda);
+                   past_data, present_data, AttentionMaskType::MASK_4D_MEGATRON, input_hidden_size, max_sequence_length,
+                   disable_cpu);
 }
 
 TEST(AttentionTest, AttentionMaskIndexOutOfRange) {
@@ -1641,7 +2015,8 @@ TEST(AttentionTest, AttentionMaskIndexOutOfRange) {
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_index_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskIndexEndAndStart);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_1D_END_START);
 }
 
 #if !defined(__wasm__)
@@ -1671,10 +2046,10 @@ TEST(AttentionTest, AttentionPastState_dynamic) {
   test.AddOptionalInputEdge<int32_t>();
   test.AddInput<float>("past", past_dims, past_data);
 
-  test.AddReferenceOutputs("testdata/attention_past_state.onnx");
+  test.AddReferenceOutputs("testdata/attention_past_state.onnx", 0.005f);
   test.Run();
 }
-#endif //!defined(__wasm__)
+#endif  //! defined(__wasm__)
 
 TEST(AttentionTest, AttentionPrunedModel) {
   int batch_size = 2;
@@ -1691,79 +2066,12 @@ TEST(AttentionTest, AttentionPrunedModel) {
       0.5f, 0.2f, 0.3f, -0.6f, 6.0f, 7.0f};
 
   std::vector<float> weight_data = {
-      0.1f,
-      -0.2f,
-      0.3f,
-      1.0f,
-      1.1f,
-      0.3f,
-      0.5f,
-      0.2f,
-      0.3f,
-      -0.6f,
-      1.5f,
-      2.0f,
-      0.5f,
-      0.1f,
-      0.4f,
-      1.6f,
-      1.0f,
-      2.0f,
-      0.4f,
-      0.8f,
-      0.9f,
-      0.1f,
-      -1.3f,
-      0.7f,
-      0.3f,
-      0.2f,
-      4.0f,
-      2.2f,
-      1.6f,
-      1.1f,
-      0.7f,
-      0.2f,
-      0.4f,
-      1.0f,
-      1.2f,
-      0.5f,
-      0.2f,
-      0.1f,
-      0.4f,
-      1.6f,
-      2.4f,
-      3.3f,
-      2.1f,
-      4.2f,
-      8.4f,
-      0.0f,
-      2.1f,
-      3.2f,
-      0.1f,
-      0.2f,
-      0.3f,
-      0.4f,
-      0.5f,
-      0.6f,
-      0.7f,
-      0.8f,
-      0.9f,
-      1.0f,
-      1.1f,
-      1.2f,
-      1.2f,
-      1.1f,
-      1.0f,
-      0.9f,
-      0.8f,
-      0.7f,
-      0.6f,
-      0.5f,
-      0.4f,
-      0.3f,
-      0.2f,
-      0.1f,
-  };
+      0.1f, -0.2f, 0.3f, 1.0f, 1.1f, 0.3f, 0.5f, 0.2f, 0.3f, -0.6f, 1.5f, 2.0f,
+      0.5f, 0.1f, 0.4f, 1.6f, 1.0f, 2.0f, 0.4f, 0.8f, 0.9f, 0.1f, -1.3f, 0.7f,
+      0.3f, 0.2f, 4.0f, 2.2f, 1.6f, 1.1f, 0.7f, 0.2f, 0.4f, 1.0f, 1.2f, 0.5f,
+      0.2f, 0.1f, 0.4f, 1.6f, 2.4f, 3.3f, 2.1f, 4.2f, 8.4f, 0.0f, 2.1f, 3.2f,
+      0.1f, 0.2f, 0.3f, 0.4f, 0.5f, 0.6f, 0.7f, 0.8f, 0.9f, 1.0f, 1.1f, 1.2f,
+      1.2f, 1.1f, 1.0f, 0.9f, 0.8f, 0.7f, 0.6f, 0.5f, 0.4f, 0.3f, 0.2f, 0.1f};
 
   std::vector<float> bias_data = {
       -0.5f, 0.6f, 1.2f, 2.1f, 0.5f, 0.7f, 0.2f, 1.2f, 0.5f, 0.4f, 0.3f, 1.2f};
@@ -1784,10 +2092,177 @@ TEST(AttentionTest, AttentionPrunedModel) {
   const std::vector<float>* present_data = nullptr;
   RunAttentionTest(input_data, weight_data, bias_data, mask_data, output_data,
                    batch_size, sequence_length, hidden_size, number_of_heads,
-                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data, kMaskRaw, input_hidden_size);
+                   use_float16, is_unidirectional, use_past_state, past_sequence_length, past_data, present_data,
+                   AttentionMaskType::MASK_2D_KEY_PADDING, input_hidden_size);
 }
 
-#ifndef ENABLE_TRAINING  // Prepacking is enabled only on non-training builds
+static void RunModelWithRandomInput(
+    int batch_size,
+    int sequence_length,
+    std::vector<int64_t>& mask_index_dims,
+    std::vector<int32_t>& mask_index_data,
+    std::string& onnx_model,
+    bool is_float16) {
+  RandomValueGenerator random{234};
+
+  constexpr int hidden_size = 768;
+  constexpr int num_heads = 12;
+  const float min_value = is_float16 ? -0.001f : -1.0f;
+  const float max_value = is_float16 ? 0.001f : 1.0f;
+
+  std::vector<int64_t> batch_input_dims{1, sequence_length, hidden_size};
+  std::vector<float> batch_input_data = random.Uniform<float>(batch_input_dims, min_value, max_value);
+
+  std::vector<int64_t> input_dims{batch_size, sequence_length, hidden_size};
+  std::vector<float> input_data;
+  for (int i = 0; i < batch_size; i++) {
+    input_data.insert(input_data.end(), batch_input_data.begin(), batch_input_data.end());
+  }
+
+  std::vector<int64_t> weight_dims{hidden_size, 3 * hidden_size};
+  std::vector<float> weight_data = random.Uniform<float>(weight_dims, min_value, max_value);
+
+  std::vector<int64_t> bias_dims{3 * hidden_size};
+  std::vector<float> bias_data = random.Uniform<float>(bias_dims, min_value, max_value);
+
+  float gpu_threshold = is_float16 ? 0.5f : 0.005f;
+  constexpr float cpu_threshold = 0.002f;
+  bool enable_cuda = HasCudaEnvironment(is_float16 ? 530 : 0);
+  bool enable_rocm = (nullptr != DefaultRocmExecutionProvider().get());
+  bool enable_cpu = (nullptr != DefaultCpuExecutionProvider().get() && !is_float16);
+  bool enable_dml = (nullptr != DefaultDmlExecutionProvider().get());
+  if (enable_cuda || enable_rocm || enable_dml) {
+    OpTester test("Attention", 1, onnxruntime::kMSDomain);
+    test.AddAttribute<int64_t>("num_heads", num_heads);
+    if (is_float16) {
+      test.AddInput<MLFloat16>("input", input_dims, ToFloat16(input_data));
+      test.AddInput<MLFloat16>("weight", weight_dims, ToFloat16(weight_data));
+      test.AddInput<MLFloat16>("bias", bias_dims, ToFloat16(bias_data));
+    } else {
+      test.AddInput<float>("input", input_dims, input_data);
+      test.AddInput<float>("weight", weight_dims, weight_data);
+      test.AddInput<float>("bias", bias_dims, bias_data);
+    }
+    if (mask_index_data.size() > 0) {
+      test.AddInput<int>("mask_index", mask_index_dims, mask_index_data);
+    }
+
+    test.AddReferenceOutputs(onnx_model, gpu_threshold);
+    std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
+    if (enable_cuda) {
+      execution_providers.push_back(DefaultCudaExecutionProvider());
+    } else if (enable_dml) {
+      execution_providers.push_back(DefaultDmlExecutionProvider());
+    } else {
+      execution_providers.push_back(DefaultRocmExecutionProvider());
+    }
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
+  }
+
+  if (enable_cpu) {
+    OpTester test("Attention", 1, onnxruntime::kMSDomain);
+    test.AddAttribute<int64_t>("num_heads", num_heads);
+    test.AddInput<float>("input", input_dims, input_data);
+    test.AddInput<float>("weight", weight_dims, weight_data);
+    test.AddInput<float>("bias", bias_dims, bias_data);
+    test.AddInput<int>("mask_index", mask_index_dims, mask_index_data);
+    test.AddReferenceOutputs(onnx_model, cpu_threshold);
+
+    std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
+    execution_providers.push_back(DefaultCpuExecutionProvider());
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
+  }
+}
+
+TEST(AttentionTest, Attention_Mask2D_Fp32_B2_S32) {
+  constexpr int batch_size = 2;
+  constexpr int sequence_length = 32;
+
+  std::vector<int64_t> mask_index_dims{batch_size, sequence_length};
+  std::vector<int32_t> mask_index_data;
+  for (int i = 0; i < batch_size; i++) {
+    for (int j = 0; j < sequence_length; j++) {
+      mask_index_data.push_back((i == 0 || j < sequence_length / 2) ? 1 : 0);
+    }
+  }
+
+  std::string onnx_model = "testdata/attention_mask2d_fp32.onnx";
+  RunModelWithRandomInput(
+      batch_size,
+      sequence_length,
+      mask_index_dims,
+      mask_index_data,
+      onnx_model,
+      false);
+}
+
+TEST(AttentionTest, Attention_Mask1D_Fp32_B2_S64) {
+  constexpr int batch_size = 2;
+  constexpr int sequence_length = 64;
+
+  std::vector<int64_t> mask_index_dims{batch_size};
+  std::vector<int32_t> mask_index_data;
+  for (int i = 0; i < batch_size; i++) {
+    mask_index_data.push_back(i == 0 ? sequence_length : (sequence_length / 2));
+  }
+
+  std::string onnx_model = "testdata/attention_mask1d_fp32.onnx";
+  RunModelWithRandomInput(
+      batch_size,
+      sequence_length,
+      mask_index_dims,
+      mask_index_data,
+      onnx_model,
+      false);
+}
+
+// This case can be used to test flash attention using Ampere GPU
+TEST(AttentionTest, Attention_NoMask_Fp16) {
+  constexpr int batch_size = 2;
+  std::vector<int> sequence_lengths{1, 7, 8};
+  for (const auto& sequence_length : sequence_lengths) {
+    std::vector<int64_t> mask_index_dims{};
+    std::vector<int32_t> mask_index_data{};
+    std::string onnx_model = "testdata/attention_no_mask_fp16.onnx";
+
+    RunModelWithRandomInput(
+        batch_size,
+        sequence_length,
+        mask_index_dims,
+        mask_index_data,
+        onnx_model,
+        true);
+  }
+}
+
+// This test is disabled since it is flaky.
+TEST(AttentionTest, DISABLED_Attention_Mask1D_Fp16_B2_FusedNoPadding) {
+  constexpr int batch_size = 2;
+
+  // Sequence lengths used in TRT fused attention fp16 v2 kernels.
+  std::vector<int> sequence_lengths{64, 128, 192, 256, 384, 512};
+
+  for (const auto& sequence_length : sequence_lengths) {
+    std::vector<int64_t> mask_index_dims{batch_size};
+    std::vector<int32_t> mask_index_data;
+    for (int i = 0; i < batch_size; i++) {
+      mask_index_data.push_back(sequence_length);
+    }
+
+    std::string onnx_model = "testdata/attention_mask1d_fp16.onnx";
+
+    RunModelWithRandomInput(
+        batch_size,
+        sequence_length,
+        mask_index_dims,
+        mask_index_data,
+        onnx_model,
+        true);
+  }
+}
+
+#ifndef ENABLE_TRAINING
+// Prepacking is disabled in full training build so no need to test the feature in a training build.
 TEST(AttentionTest, SharedPrepackedWeights) {
   int batch_size = 2;
   int sequence_length = 2;
@@ -1821,6 +2296,7 @@ TEST(AttentionTest, SharedPrepackedWeights) {
   OpTester tester("Attention", 1, onnxruntime::kMSDomain);
   tester.AddAttribute<int64_t>("num_heads", static_cast<int64_t>(number_of_heads));
   tester.AddAttribute<int64_t>("unidirectional", static_cast<int64_t>(0));
+  tester.AddAttribute<float>("mask_filter_value", static_cast<float>(-10000.0f));
 
   std::vector<int64_t> input_dims = {batch_size, sequence_length, hidden_size};
   std::vector<int64_t> weights_dims = {hidden_size, 3 * hidden_size};

@@ -1,60 +1,99 @@
-// Copyright (c) Xilinx Inc. All rights reserved.
+// Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
-#include "core/providers/vitisai/vitisai_provider_factory.h"
-#include <atomic>
-#include "vitisai_execution_provider.h"
-#include "core/session/abi_session_options_impl.h"
+#include "vitisai_provider_factory_creator.h"
+
+#include <algorithm>
+#include <cctype>
+#include <unordered_map>
+#include <string>
+
+#include "vaip/global_api.h"
+#include "./vitisai_execution_provider.h"
+#include "core/framework/execution_provider.h"
 
 using namespace onnxruntime;
-
 namespace onnxruntime {
 
 struct VitisAIProviderFactory : IExecutionProviderFactory {
-  VitisAIProviderFactory(std::string&& backend_type, int device_id, std::string&& export_runtime_module,
-                         std::string&& load_runtime_module)
-    : backend_type_(std::move(backend_type)), device_id_(device_id),
-      export_runtime_module_(std::move(export_runtime_module)),
-      load_runtime_module_(std::move(load_runtime_module)) {}
+  VitisAIProviderFactory(const ProviderOptions& info) : info_(info) {}
   ~VitisAIProviderFactory() = default;
 
   std::unique_ptr<IExecutionProvider> CreateProvider() override;
+  std::unique_ptr<IExecutionProvider> CreateProvider(const OrtSessionOptions& session_options,
+                                                     const OrtLogger& session_logger) override;
 
  private:
-  // The Vitis AI DPU target
-  const std::string backend_type_;
-  // Device ID (Unused for now)
-  int device_id_;
-  // If not empty, the path to the file where the PyXIR runtime module
-  //	should be exported to (used for cross compilation)
-  const std::string export_runtime_module_;
-  // If not empty, the path to the file where the PyXIR runtime module
-  //	should be loaded from
-  const std::string load_runtime_module_;
+  ProviderOptions info_;
 };
 
 std::unique_ptr<IExecutionProvider> VitisAIProviderFactory::CreateProvider() {
-  VitisAIExecutionProviderInfo info;
-  info.backend_type = backend_type_;
-  info.device_id = device_id_;
-  info.export_runtime_module = export_runtime_module_;
-  info.load_runtime_module = load_runtime_module_;
-  return std::make_unique<VitisAIExecutionProvider>(info);
+  return std::make_unique<VitisAIExecutionProvider>(info_);
 }
 
-std::shared_ptr<IExecutionProviderFactory> CreateExecutionProviderFactory_VITISAI(
-    const char* backend_type, int device_id, const char* export_runtime_module,
-    const char* load_runtime_module) {
-  return std::make_shared<onnxruntime::VitisAIProviderFactory>(
-    backend_type, device_id, export_runtime_module, load_runtime_module);
+std::unique_ptr<IExecutionProvider> VitisAIProviderFactory::CreateProvider(const OrtSessionOptions& session_options,
+                                                                           const OrtLogger& session_logger) {
+  const ConfigOptions& config_options = session_options.GetConfigOptions();
+  const std::unordered_map<std::string, std::string>& config_options_map = config_options.GetConfigOptionsMap();
+
+  // The implementation of the SessionOptionsAppendExecutionProvider C API function automatically adds EP options to
+  // the session option configurations with the key prefix "ep.<lowercase_ep_name>.".
+  // Extract those EP options into a new "provider_options" map.
+  std::string lowercase_ep_name = kVitisAIExecutionProvider;
+  std::transform(lowercase_ep_name.begin(), lowercase_ep_name.end(), lowercase_ep_name.begin(), [](unsigned char c) {
+    return static_cast<char>(std::tolower(c));
+  });
+
+  std::string key_prefix = "ep.";
+  key_prefix += lowercase_ep_name;
+  key_prefix += ".";
+
+  std::unordered_map<std::string, std::string> provider_options = info_;
+  for (const auto& [key, value] : config_options_map) {
+    if (key.rfind(key_prefix, 0) == 0) {
+      provider_options[key.substr(key_prefix.size())] = value;
+    }
+  }
+
+  // Store pointer to session options as done in SessionOptionsAppendExecutionProvider_VitisAI
+  provider_options["session_options"] = std::to_string((uintptr_t)(void*)&session_options);
+
+  auto ep_instance = std::make_unique<VitisAIExecutionProvider>(provider_options);
+  ep_instance->SetLogger(reinterpret_cast<const logging::Logger*>(&session_logger));
+  return ep_instance;
 }
+
+struct VitisAI_Provider : Provider {
+  // Takes a pointer to a provider specific structure to create the factory. For example, with OpenVINO it is a pointer to an OrtOpenVINOProviderOptions structure
+  std::shared_ptr<IExecutionProviderFactory>
+  CreateExecutionProviderFactory(const void* options) override {
+    return std::make_shared<VitisAIProviderFactory>(GetProviderOptions(options));
+  }
+  // Convert provider options struct to ProviderOptions which is a map
+  ProviderOptions GetProviderOptions(const void* options) override {
+    auto vitisai_options = reinterpret_cast<const ProviderOptions*>(options);
+    return *vitisai_options;
+  }
+  // Update provider options from key-value string configuration
+  void UpdateProviderOptions(void* options, const ProviderOptions& provider_options) override {
+    auto vitisai_options = reinterpret_cast<ProviderOptions*>(options);
+    for (const auto& entry : provider_options) {
+      vitisai_options->insert_or_assign(entry.first, entry.second);
+    }
+  };
+  // Get provider specific custom op domain list. Provider has the resposibility to release OrtCustomOpDomain instances it creates.
+  void GetCustomOpDomainList(IExecutionProviderFactory*, std::vector<OrtCustomOpDomain*>&) override {};
+  // Called right after loading the shared library, if this throws any errors Shutdown() will be called and the library unloaded
+  void Initialize() override { initialize_vitisai_ep(); }
+  // Called right before unloading the shared library
+  void Shutdown() override { deinitialize_vitisai_ep(); }
+} g_provider;
+
 }  // namespace onnxruntime
 
-ORT_API_STATUS_IMPL(OrtSessionOptionsAppendExecutionProvider_VITISAI,
-                    _In_ OrtSessionOptions* options, _In_ const char* backend_type, int device_id,
-                    const char* export_runtime_module, const char* load_runtime_module) {
-  options->provider_factories.push_back(onnxruntime::CreateExecutionProviderFactory_VITISAI(
-    backend_type, device_id, export_runtime_module, load_runtime_module));
-  return nullptr;
-}
+extern "C" {
 
+ORT_API(onnxruntime::Provider*, GetProvider) {
+  return &onnxruntime::g_provider;
+}
+}

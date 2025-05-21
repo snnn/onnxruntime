@@ -3,6 +3,8 @@
 
 #pragma once
 
+#include <string>
+#include <unordered_map>
 #include "core/providers/dml/DmlExecutionProvider/src/GraphDescBuilder.h"
 
 namespace Dml
@@ -44,29 +46,12 @@ namespace Dml
     BuildPartitions(
         const onnxruntime::GraphViewer& graph,
         const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap& internalRegInfoMap,
-        const std::vector<const onnxruntime::KernelRegistry*>& registries,
+        const onnxruntime::IExecutionProvider::IKernelLookup& kernel_lookup,
         uint32_t supportedDeviceDataTypeMask, // Each bit corresponds to each DML_TENSOR_DATA_TYPE.
         std::unordered_map<const onnxruntime::Node*, GraphNodeProperties>& graphNodePropertyMap,
         std::unordered_set<std::string>& requiredInitializerMap,
-        std::function<void(const onnxruntime::Node&)> onNodeUnsupportedInGraph = nullptr);
-
-    std::vector<std::unique_ptr<onnxruntime::ComputeCapability>>
-    PartitionGraph(
-        const onnxruntime::GraphViewer& graph,
-        const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap& internalRegInfoMap,
-        const std::vector<const onnxruntime::KernelRegistry*>& registries,
-        uint32_t supportedDeviceDataTypeMask, // Each bit corresponds to each DML_TENSOR_DATA_TYPE.
-        onnxruntime::KernelRegistry* registryForPartitionKernels,
-        const std::string& partitionKernelPrefix
-    );
-
-    bool IsNodeSupportedByDml(
-        const onnxruntime::Node& node,
-        const onnxruntime::KernelRegistry& registry,
-        uint32_t supportedDeviceDataTypeMask, // Each bit corresponds to each DML_TENSOR_DATA_TYPE.
-        const Windows::AI::MachineLearning::Adapter::InternalRegistrationInfoMap& internalRegInfoMap,
-        bool allow64BitInputThroughStrides,
-        _In_opt_ const std::unordered_map<std::string, GraphPartition*>* nodeNameToPartitionMap // Only used when allow64BitInputThroughStrides is true
-    );
-
+        std::unordered_set<std::string>& dynamicCpuInputMap,
+        gsl::span<const onnxruntime::NodeIndex> additionalSplittingNodes,
+        const std::unordered_map<std::string, const onnxruntime::NodeArg*>& implicitInputs,
+        bool allowDmlGraphDynamicShapes);
 } // namespace Dml

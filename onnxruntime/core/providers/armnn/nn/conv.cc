@@ -105,7 +105,7 @@ Status Conv<T>::Compute(OpKernelContext* context) const {
     return s;
   }
 
-  if(W->Shape()[2] == 9 && W->Shape()[3] == 9) {
+  if (W->Shape()[2] == 9 && W->Shape()[3] == 9) {
     LOGS_DEFAULT(WARNING) << "9x9 DirectConvolution does not have an implementation in NCHW layout; defaulting to cpu implementation";
     Status s = onnxruntime::Conv<T>::Compute(context);
     return s;
@@ -142,15 +142,15 @@ Status Conv<T>::Compute(OpKernelContext* context) const {
 
   bool biasEnabled = B != nullptr;
 
-  const T* x_data = X->template Data<T>();
-  const T* k_data = W->template Data<T>();
+  const T* x_data = X->Data<T>();
+  const T* k_data = W->Data<T>();
 
   const T* b_data;
   if (biasEnabled) {
-    b_data = B->template Data<T>();
+    b_data = B->Data<T>();
   }
 
-  T* y_data = Y->template MutableData<T>();
+  T* y_data = Y->MutableData<T>();
 
   armnn::NetworkId* pNetworkId;
   ConvLayersIterator it = Conv::convLayers.find((OpKernel*)this);
@@ -255,7 +255,7 @@ Status Conv<T>::Compute(OpKernelContext* context) const {
       convolution_armnn->GetOutputSlot(0).Connect(OutputLayer->GetInputSlot(0));
     }
 
-    //Set the tensors in the network.
+    // Set the tensors in the network.
     armnn::TensorInfo inputTensorInfo(inputShape, armnn::DataType::Float32);
     InputLayer->GetOutputSlot(0).SetTensorInfo(inputTensorInfo);
 
@@ -266,7 +266,7 @@ Status Conv<T>::Compute(OpKernelContext* context) const {
       activation->GetOutputSlot(0).SetTensorInfo(outputTensorInfo);
     }
 
-    // Optimise ArmNN network
+    // Optimize ArmNN network
     armnn::IOptimizedNetworkPtr optNet = armnn::Optimize(*myNetwork, {armnn::Compute::CpuAcc}, Conv::run->GetDeviceSpec());
 
     if (optNet == nullptr) {

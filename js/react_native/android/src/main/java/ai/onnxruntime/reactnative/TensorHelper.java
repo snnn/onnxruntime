@@ -3,6 +3,7 @@
 
 package ai.onnxruntime.reactnative;
 
+import ai.onnxruntime.OnnxJavaType;
 import ai.onnxruntime.OnnxTensor;
 import ai.onnxruntime.OnnxValue;
 import ai.onnxruntime.OrtEnvironment;
@@ -15,6 +16,7 @@ import com.facebook.react.bridge.ReadableArray;
 import com.facebook.react.bridge.ReadableMap;
 import com.facebook.react.bridge.WritableArray;
 import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.modules.blob.BlobModule;
 import java.nio.ByteBuffer;
 import java.nio.ByteOrder;
 import java.nio.DoubleBuffer;
@@ -34,6 +36,7 @@ public class TensorHelper {
    */
   public static final String JsTensorTypeBool = "bool";
   public static final String JsTensorTypeByte = "int8";
+  public static final String JsTensorTypeUnsignedByte = "uint8";
   public static final String JsTensorTypeShort = "int16";
   public static final String JsTensorTypeInt = "int32";
   public static final String JsTensorTypeLong = "int64";
@@ -43,9 +46,10 @@ public class TensorHelper {
 
   /**
    * It creates an input tensor from a map passed by react native js.
-   * 'data' must be a string type as data is encoded as base64. It first decodes it and creates a tensor.
+   * 'data' is blob object and the buffer is stored in BlobModule. It first resolve it and creates a tensor.
    */
-  public static OnnxTensor createInputTensor(ReadableMap inputTensor, OrtEnvironment ortEnvironment) throws Exception {
+  public static OnnxTensor createInputTensor(BlobModule blobModule, ReadableMap inputTensor,
+                                             OrtEnvironment ortEnvironment) throws Exception {
     // shape
     ReadableArray dimsArray = inputTensor.getArray("dims");
     long[] dims = new long[dimsArray.size()];
@@ -66,8 +70,11 @@ public class TensorHelper {
       }
       onnxTensor = OnnxTensor.createTensor(ortEnvironment, buffer, dims);
     } else {
-      String data = inputTensor.getString("data");
-      ByteBuffer values = ByteBuffer.wrap(Base64.decode(data, Base64.DEFAULT)).order(ByteOrder.nativeOrder());
+      ReadableMap data = inputTensor.getMap("data");
+      String blobId = data.getString("blobId");
+      byte[] bytes = blobModule.resolve(blobId, data.getInt("offset"), data.getInt("size"));
+      blobModule.remove(blobId);
+      ByteBuffer values = ByteBuffer.wrap(bytes).order(ByteOrder.nativeOrder());
       onnxTensor = createInputTensor(tensorType, dims, values, ortEnvironment);
     }
 
@@ -76,9 +83,9 @@ public class TensorHelper {
 
   /**
    * It creates an output map from an output tensor.
-   * a data array is encoded as base64 string.
+   * a data array is store in BlobModule.
    */
-  public static WritableMap createOutputTensor(OrtSession.Result result) throws Exception {
+  public static WritableMap createOutputTensor(BlobModule blobModule, OrtSession.Result result) throws Exception {
     WritableMap outputTensorMap = Arguments.createMap();
 
     Iterator<Map.Entry<String, OnnxValue>> iterator = result.iterator();
@@ -113,8 +120,13 @@ public class TensorHelper {
         }
         outputTensor.putArray("data", dataArray);
       } else {
-        String data = createOutputTensor(onnxTensor);
-        outputTensor.putString("data", data);
+        // Store in BlobModule then create a blob object as data
+        byte[] bufferArray = createOutputTensor(onnxTensor);
+        WritableMap data = Arguments.createMap();
+        data.putString("blobId", blobModule.store(bufferArray));
+        data.putInt("offset", 0);
+        data.putInt("size", bufferArray.length);
+        outputTensor.putMap("data", data);
       }
 
       outputTensorMap.putMap(outputName, outputTensor);
@@ -157,9 +169,17 @@ public class TensorHelper {
       tensor = OnnxTensor.createTensor(ortEnvironment, buffer, dims);
       break;
     }
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL:
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: {
+      ByteBuffer buffer = values;
+      tensor = OnnxTensor.createTensor(ortEnvironment, buffer, dims, OnnxJavaType.UINT8);
+      break;
+    }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_BOOL: {
+      ByteBuffer buffer = values;
+      tensor = OnnxTensor.createTensor(ortEnvironment, buffer, dims, OnnxJavaType.BOOL);
+      break;
+    }
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
@@ -171,7 +191,7 @@ public class TensorHelper {
     return tensor;
   }
 
-  private static String createOutputTensor(OnnxTensor onnxTensor) throws Exception {
+  private static byte[] createOutputTensor(OnnxTensor onnxTensor) throws Exception {
     TensorInfo tensorInfo = onnxTensor.getInfo();
     ByteBuffer buffer = null;
 
@@ -204,9 +224,13 @@ public class TensorHelper {
       buffer.asDoubleBuffer().put(onnxTensor.getDoubleBuffer());
       break;
     }
+    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8: {
+      buffer = ByteBuffer.allocate(capacity).order(ByteOrder.nativeOrder());
+      buffer.put(onnxTensor.getByteBuffer());
+      break;
+    }
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT16:
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_STRING:
-    case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8:
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT16:
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT32:
     case ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT64:
@@ -214,8 +238,7 @@ public class TensorHelper {
       throw new IllegalStateException("Unexpected type: " + tensorInfo.onnxType.toString());
     }
 
-    String data = Base64.encodeToString(buffer.array(), Base64.DEFAULT);
-    return data;
+    return buffer.array();
   }
 
   private static final Map<String, TensorInfo.OnnxTensorType> JsTensorTypeToOnnxTensorTypeMap =
@@ -223,6 +246,7 @@ public class TensorHelper {
           .of(new Object[][] {
               {JsTensorTypeFloat, TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT},
               {JsTensorTypeByte, TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8},
+              {JsTensorTypeUnsignedByte, TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8},
               {JsTensorTypeShort, TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16},
               {JsTensorTypeInt, TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32},
               {JsTensorTypeLong, TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64},
@@ -245,6 +269,7 @@ public class TensorHelper {
           .of(new Object[][] {
               {TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_FLOAT, JsTensorTypeFloat},
               {TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_INT8, JsTensorTypeByte},
+              {TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_UINT8, JsTensorTypeUnsignedByte},
               {TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_INT16, JsTensorTypeShort},
               {TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_INT32, JsTensorTypeInt},
               {TensorInfo.OnnxTensorType.ONNX_TENSOR_ELEMENT_DATA_TYPE_INT64, JsTensorTypeLong},

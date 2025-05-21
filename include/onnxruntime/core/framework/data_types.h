@@ -9,18 +9,15 @@
 #include <type_traits>
 #include <map>
 #include <unordered_map>
-#include "core/common/gsl_suppress.h"
+#include <gsl/gsl>
 #include "core/common/common.h"
 #include "core/common/exceptions.h"
 #include "core/framework/endian.h"
+#include "core/framework/float8.h"
 #include "core/framework/float16.h"
-#if !defined(ORT_MINIMAL_BUILD)
-#include "onnx/defs/schema.h"
-#else
-#include "onnx/defs/data_type_utils.h"
-#endif
-#include "onnx/onnx_pb.h"
-#include "onnx/onnx-operators_pb.h"
+#include "core/framework/int4.h"
+#include "core/graph/onnx_protobuf.h"
+#include "core/framework/to_tensor_proto_element_type.h"
 
 struct OrtValue;
 
@@ -206,18 +203,50 @@ class DataTypeImpl {
   static void RegisterDataType(MLDataType);
   static MLDataType GetDataType(const std::string&);
 
-  static const std::vector<MLDataType>& AllTensorTypes();
-  static const std::vector<MLDataType>& AllFixedSizeTensorTypes();
-  static const std::vector<MLDataType>& AllSequenceTensorTypes();
-  static const std::vector<MLDataType>& AllFixedSizeSequenceTensorTypes();
-  static const std::vector<MLDataType>& AllNumericTensorTypes();
-  static const std::vector<MLDataType>& AllIEEEFloatTensorTypes();
-  static const std::vector<MLDataType>& AllFixedSizeTensorExceptHalfTypes();
-  static const std::vector<MLDataType>& AllIEEEFloatTensorExceptHalfTypes();
-  static const std::vector<MLDataType>& AllTensorAndSequenceTensorTypes();
-  static const std::vector<MLDataType>& AllFixedSizeTensorAndSequenceTensorTypes();
-  static const std::vector<MLDataType>& AllOptionalTypes();
-  static const std::vector<MLDataType>& AllTensorAndSequenceTensorAndOptionalTypes();
+  // IR4: includes all float types, includes float16, bfloat16
+  // IR9: includes float 8 types as well
+  static const std::vector<MLDataType>& AllTensorTypes();  // up to IR4 (no float 8), deprecated
+  static const std::vector<MLDataType>& AllTensorTypesIRv4();
+  static const std::vector<MLDataType>& AllTensorTypesIRv9();
+  static const std::vector<MLDataType>& AllTensorTypesIRv10();
+
+  static const std::vector<MLDataType>& AllFixedSizeTensorTypes();  // up to IR4 (no float 8), deprecated
+  static const std::vector<MLDataType>& AllFixedSizeTensorTypesIRv4();
+  static const std::vector<MLDataType>& AllFixedSizeTensorTypesIRv9();
+
+  static const std::vector<MLDataType>& AllSequenceTensorTypes();  // up to IR4 (no float 8), deprecated
+  static const std::vector<MLDataType>& AllSequenceTensorTypesIRv4();
+  static const std::vector<MLDataType>& AllSequenceTensorTypesIRv9();
+
+  static const std::vector<MLDataType>& AllFixedSizeSequenceTensorTypes();  // up to IR4 (no float 8), deprecated
+  static const std::vector<MLDataType>& AllFixedSizeSequenceTensorTypesIRv4();
+  static const std::vector<MLDataType>& AllFixedSizeSequenceTensorTypesIRv9();
+
+  static const std::vector<MLDataType>& AllNumericTensorTypes();  // up to IR4 (no float 8), deprecated
+  static const std::vector<MLDataType>& AllNumericTensorTypesIRv4();
+  static const std::vector<MLDataType>& AllNumericTensorTypesIRv9();
+
+  static const std::vector<MLDataType>& AllIEEEFloatTensorTypes();  // float16, float, double
+
+  static const std::vector<MLDataType>& AllTensorAndSequenceTensorTypes();  // up to IR4 (no float 8), deprecated
+  static const std::vector<MLDataType>& AllTensorAndSequenceTensorTypesIRv4();
+  static const std::vector<MLDataType>& AllTensorAndSequenceTensorTypesIRv9();
+
+  static const std::vector<MLDataType>& AllOptionalAndTensorAndSequenceTensorTypes();  // up to IR4 (no float 8), deprecated
+  static const std::vector<MLDataType>& AllOptionalAndTensorAndSequenceTensorTypesIRv4();
+  static const std::vector<MLDataType>& AllOptionalAndTensorAndSequenceTensorTypesIRv9();
+
+  static const std::vector<MLDataType>& AllFixedSizeTensorAndSequenceTensorTypes();  // up to IR4 (no float 8), deprecated
+  static const std::vector<MLDataType>& AllFixedSizeTensorAndSequenceTensorTypesIRv4();
+  static const std::vector<MLDataType>& AllFixedSizeTensorAndSequenceTensorTypesIRv9();
+
+  static const std::vector<MLDataType>& AllOptionalTypes();  // up to IR4 (no float 8), deprecated
+  static const std::vector<MLDataType>& AllOptionalTypesIRv4();
+  static const std::vector<MLDataType>& AllOptionalTypesIRv9();
+
+  static const std::vector<MLDataType>& AllTensorAndSequenceTensorAndOptionalTypes();  // up to IR4 (no float 8), deprecated
+  static const std::vector<MLDataType>& AllTensorAndSequenceTensorAndOptionalTypesIRv4();
+  static const std::vector<MLDataType>& AllTensorAndSequenceTensorAndOptionalTypesIRv9();
 };
 
 std::ostream& operator<<(std::ostream& out, MLDataType data_type);
@@ -228,67 +257,6 @@ std::ostream& operator<<(std::ostream& out, MLDataType data_type);
 namespace data_types_internal {
 /// TensorType helpers
 ///
-
-template <typename T>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType() {
-  return ONNX_NAMESPACE::TensorProto_DataType_UNDEFINED;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<float>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_FLOAT;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<uint8_t>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_UINT8;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<int8_t>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_INT8;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<uint16_t>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_UINT16;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<int16_t>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_INT16;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<int32_t>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_INT32;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<int64_t>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_INT64;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<std::string>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_STRING;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<bool>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_BOOL;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<MLFloat16>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_FLOAT16;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<double>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_DOUBLE;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<uint32_t>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_UINT32;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<uint64_t>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_UINT64;
-}
-template <>
-constexpr ONNX_NAMESPACE::TensorProto_DataType ToTensorDataType<BFloat16>() {
-  return ONNX_NAMESPACE::TensorProto_DataType_BFLOAT16;
-}
 
 /// Is a given type on the list of types?
 /// Accepts a list of types and the first argument is the type
@@ -314,7 +282,13 @@ struct IsAnyOf<T, H, Tail...> {
 template <typename T>
 struct IsTensorContainedType : public IsAnyOf<T, float, uint8_t, int8_t, uint16_t, int16_t,
                                               int32_t, int64_t, std::string, bool, MLFloat16,
-                                              double, uint32_t, uint64_t, BFloat16> {
+                                              double, uint32_t, uint64_t, BFloat16,
+                                              Int4x2, UInt4x2
+#if !defined(DISABLE_FLOAT8_TYPES)
+                                              ,
+                                              Float8E4M3FN, Float8E4M3FNUZ, Float8E5M2, Float8E5M2FNUZ
+#endif
+                                              > {
 };
 
 #if !defined(DISABLE_SPARSE_TENSORS)
@@ -324,7 +298,12 @@ struct IsTensorContainedType : public IsAnyOf<T, float, uint8_t, int8_t, uint16_
 template <typename T>
 struct IsSparseTensorContainedType : public IsAnyOf<T, float, uint8_t, int8_t, uint16_t, int16_t,
                                                     int32_t, int64_t, std::string, bool, MLFloat16,
-                                                    double, uint32_t, uint64_t, BFloat16> {
+                                                    double, uint32_t, uint64_t, BFloat16
+#if !defined(DISABLE_FLOAT8_TYPES)
+                                                    ,
+                                                    Float8E4M3FN, Float8E4M3FNUZ, Float8E5M2, Float8E5M2FNUZ
+#endif
+                                                    > {
 };
 #endif
 
@@ -445,8 +424,8 @@ void AssignOpaqueDomainName(const char* domain, const char* name,
 
 }  // namespace data_types_internal
 
-//The suppressed warning is: "The type with a virtual function needs either public virtual or protected nonvirtual destructor."
-//However, we do not allocate this type on heap.
+// The suppressed warning is: "The type with a virtual function needs either public virtual or protected nonvirtual destructor."
+// However, we do not allocate this type on heap.
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma warning(push)
 #pragma warning(disable : 26436)
@@ -512,12 +491,13 @@ class TensorType : public TensorTypeBase {
  private:
   TensorType() {
     using namespace data_types_internal;
-    TensorTypeHelper::Set(ToTensorDataType<elemT>(), MutableTypeProto());
+    TensorTypeHelper::Set(utils::ToTensorProtoElementType<elemT>(), MutableTypeProto());
   }
 };
 
 #if defined(DISABLE_OPTIONAL_TYPE)
 
+// TODO is this still needed after removing kernel def hashes?
 /// Common base-class for all disabled types. We need DataTypeImpl::ToString to work in a minimal build
 /// with disabled types to keep the ORT format model kernel hashes stable.
 class DisabledTypeBase : public DataTypeImpl {
@@ -601,7 +581,7 @@ class SparseTensorType : public SparseTensorTypeBase {
  private:
   SparseTensorType() {
     using namespace data_types_internal;
-    SparseTensorTypeHelper::Set(ToTensorDataType<elemT>(), MutableTypeProto());
+    SparseTensorTypeHelper::Set(utils::ToTensorProtoElementType<elemT>(), MutableTypeProto());
   }
 };
 
@@ -672,7 +652,7 @@ class OptionalType :
 #if !defined(DISABLE_OPTIONAL_TYPE)
   OptionalType()
 #else
-  OptionalType() : DisabledTypeBase { DataTypeImpl::GeneralType::kOptional, 0 }
+  OptionalType() : DisabledTypeBase{DataTypeImpl::GeneralType::kOptional, 0}
 #endif
   {
     using namespace data_types_internal;
@@ -799,7 +779,7 @@ class MapType : public NonTensorType<CPPType> {
  private:
   MapType() {
     using namespace data_types_internal;
-    MapTypeHelper::Set(ToTensorDataType<typename CPPType::key_type>(),
+    MapTypeHelper::Set(utils::ToTensorProtoElementType<typename CPPType::key_type>(),
                        MapTypeHelper::GetValueType<typename CPPType::mapped_type>()->GetTypeProto(),
                        this->MutableTypeProto());
   }
@@ -940,7 +920,8 @@ class OpaqueType : public NonTensorType<T> {
  *        Base class for primitive Tensor contained types
  *
  * \details This class contains an integer constant that can be
- *          used for input data type dispatching
+ *          used for input data type dispatching. This class also stores the number of subelements per size units.
+ *          Example: For int4, the size unit is 1 byte and the number of subelements is 2.
  *
  */
 class PrimitiveDataTypeBase : public DataTypeImpl {
@@ -957,12 +938,21 @@ class PrimitiveDataTypeBase : public DataTypeImpl {
     return data_type_;
   }
 
+  int32_t GetNumSubElems() const {
+    return num_sub_elems_;
+  }
+
+  bool HasSubElems() const {
+    return num_sub_elems_ > 1;
+  }
+
  protected:
-  PrimitiveDataTypeBase(size_t size, int32_t data_type)
-      : DataTypeImpl{GeneralType::kPrimitive, size}, data_type_{data_type} {}
+  PrimitiveDataTypeBase(size_t size, int32_t data_type, int32_t num_sub_elems)
+      : DataTypeImpl{GeneralType::kPrimitive, size}, data_type_{data_type}, num_sub_elems_{num_sub_elems} {}
 
  private:
   const int32_t data_type_;
+  const int32_t num_sub_elems_;  // > 1 for subbyte primitives, 1 for normal primitives.
 };
 
 /**
@@ -988,9 +978,9 @@ class PrimitiveDataType : public PrimitiveDataTypeBase {
   }
 
  private:
-  PrimitiveDataType()
+  explicit PrimitiveDataType(int32_t num_sub_elems)
       : PrimitiveDataTypeBase{sizeof(T),
-                              data_types_internal::ToTensorDataType<T>()} {
+                              utils::ToTensorProtoElementType<T>(), num_sub_elems} {
   }
 };
 
@@ -1097,15 +1087,30 @@ inline const PrimitiveDataTypeBase* DataTypeImpl::AsPrimitiveDataType() const {
     return SequenceTensorType<ELEM_TYPE>::Type();               \
   }
 
-#define ORT_REGISTER_PRIM_TYPE(TYPE)               \
-  template <>                                      \
-  MLDataType PrimitiveDataType<TYPE>::Type() {     \
-    static PrimitiveDataType<TYPE> prim_data_type; \
-    return &prim_data_type;                        \
-  }                                                \
-  template <>                                      \
-  MLDataType DataTypeImpl::GetType<TYPE>() {       \
-    return PrimitiveDataType<TYPE>::Type();        \
+#define ORT_REGISTER_PRIM_TYPE(TYPE)                  \
+  template <>                                         \
+  MLDataType PrimitiveDataType<TYPE>::Type() {        \
+    static PrimitiveDataType<TYPE> prim_data_type(1); \
+    return &prim_data_type;                           \
+  }                                                   \
+  template <>                                         \
+  MLDataType DataTypeImpl::GetType<TYPE>() {          \
+    return PrimitiveDataType<TYPE>::Type();           \
+  }
+
+// Registers a subbyte primitive.
+// Examples:
+//   - Int4x2 stores 2 packed 4-bit elements in 1 byte: ORT_*_SUBBYTE_TYPE(Int4x2, 2)
+//   - [not supported] Int3x8 could store 8 packed 3-bit elements in 3 bytes: ORT_*_SUBBYTE_TYPE(Int3x8, 8)
+#define ORT_REGISTER_PRIM_SUBBYTE_TYPE(TYPE, NUM_SUB_ELEMS)       \
+  template <>                                                     \
+  MLDataType PrimitiveDataType<TYPE>::Type() {                    \
+    static PrimitiveDataType<TYPE> prim_data_type(NUM_SUB_ELEMS); \
+    return &prim_data_type;                                       \
+  }                                                               \
+  template <>                                                     \
+  MLDataType DataTypeImpl::GetType<TYPE>() {                      \
+    return PrimitiveDataType<TYPE>::Type();                       \
   }
 
 #define ORT_REGISTER_OPAQUE_TYPE(CPPType, Domain, Name)   \

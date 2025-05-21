@@ -7,6 +7,10 @@
 #include <sstream>
 #include <assert.h>
 #include <stdexcept>
+#if defined(_AIX)
+#include <sys/stat.h>
+#include <iostream>
+#endif
 #ifdef _WIN32
 #include <Windows.h>
 #include <time.h>  //strftime
@@ -24,6 +28,9 @@ using PATH_CHAR_TYPE = ORTCHAR_T;
 
 template <typename T>
 long OrtStrtol(const T* nptr, T** endptr);
+
+template <typename T>
+double OrtStrtod(const T* nptr, T** endptr);
 
 /**
  * Convert a C string to ssize_t(or ptrdiff_t)
@@ -79,6 +86,16 @@ inline long OrtStrtol<char>(const char* nptr, char** endptr) {
 template <>
 inline long OrtStrtol<wchar_t>(const wchar_t* nptr, wchar_t** endptr) {
   return wcstol(nptr, endptr, 10);
+}
+
+template <>
+inline double OrtStrtod<char>(const char* nptr, char** endptr) {
+  return strtod(nptr, endptr);
+}
+
+template <>
+inline double OrtStrtod<wchar_t>(const wchar_t* nptr, wchar_t** endptr) {
+  return wcstod(nptr, endptr);
 }
 
 namespace onnxruntime {
@@ -161,15 +178,14 @@ inline wchar_t GetPathSep<wchar_t>() {
 }
 #endif
 
-template <typename PATH_CHAR_TYPE>
-std::basic_string<PATH_CHAR_TYPE> ConcatPathComponent(const std::basic_string<PATH_CHAR_TYPE>& left,
-                                                      const std::basic_string<PATH_CHAR_TYPE>& right) {
+inline std::basic_string<PATH_CHAR_TYPE> ConcatPathComponent(std::basic_string_view<PATH_CHAR_TYPE> left,
+                                                             std::basic_string_view<PATH_CHAR_TYPE> right) {
   std::basic_string<PATH_CHAR_TYPE> ret(left);
   ret.append(1, GetPathSep<PATH_CHAR_TYPE>()).append(right);
   return ret;
 }
 
-#ifdef _WIN32
+#if defined(_WIN32)
 inline OrtFileType DTToFileType(DWORD dwFileAttributes) {
   if (dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
     return OrtFileType::TYPE_DIR;
@@ -205,21 +221,79 @@ void LoopDir(const std::wstring& dir_name, T func) {
   }
 }
 
-//TODO: rewrite it with PathFindNextComponentW
+// TODO: rewrite it with PathFindNextComponentW
 inline std::basic_string<PATH_CHAR_TYPE> GetLastComponent(const std::basic_string<PATH_CHAR_TYPE>& s) {
   if (s.empty()) return std::basic_string<PATH_CHAR_TYPE>(1, GetDot<PATH_CHAR_TYPE>());
   std::basic_string<PATH_CHAR_TYPE> input = s;
   typename std::basic_string<PATH_CHAR_TYPE>::size_type pos = input.length();
   PATH_CHAR_TYPE sep = GetPathSep<PATH_CHAR_TYPE>();
   // remove trailing backslash
-  for (; pos > 1 && input[pos - 1] == sep; --pos)
-    ;
+  for (; pos > 1 && input[pos - 1] == sep; --pos);
   input.resize(pos);
-  for (; pos != 0 && input[pos - 1] != sep; --pos)
-    ;
+  for (; pos != 0 && input[pos - 1] != sep; --pos);
   return input.substr(pos);
 }
 
+#elif defined(_AIX)
+inline OrtFileType DTToFileTypeAIX(struct stat st) {
+  switch (st.st_mode & _S_IFMT) {
+    case S_IFBLK:
+      return OrtFileType::TYPE_BLK;
+    case S_IFCHR:
+      return OrtFileType::TYPE_CHR;
+    case S_IFDIR:
+      return OrtFileType::TYPE_DIR;
+    case S_IFIFO:
+      return OrtFileType::TYPE_FIFO;
+    case S_IFLNK:
+      return OrtFileType::TYPE_LNK;
+    case S_IFREG:
+      return OrtFileType::TYPE_REG;
+    /* No Socket type */
+    default:
+      return OrtFileType::TYPE_UNKNOWN;
+  }
+}
+
+template <typename T>
+void LoopDir(const std::string& dir_name, T func) {
+  DIR* dir = opendir(dir_name.c_str());
+  struct stat stats;
+  if (dir == nullptr) {
+    auto e = errno;
+    char buf[1024];
+    char* msg;
+#if defined(__GLIBC__) && defined(_GNU_SOURCE)
+    msg = strerror_r(e, buf, sizeof(buf));
+#else
+    if (strerror_r(e, buf, sizeof(buf)) != 0) {
+      buf[0] = '\0';
+    }
+    msg = buf;
+#endif
+    std::ostringstream oss;
+    oss << "couldn't open '" << dir_name << "':" << msg;
+    std::string s = oss.str();
+    ORT_THROW(s);
+  }
+  ORT_TRY {
+    struct dirent* dp;
+    while ((dp = readdir(dir)) != nullptr) {
+      std::basic_string<PATH_CHAR_TYPE> filename = ConcatPathComponent(dir_name, dp->d_name);
+      if (stat(filename.c_str(), &stats) != 0) {
+        continue;
+      }
+      if (!func(dp->d_name, DTToFileTypeAIX(stats))) {
+        break;
+      }
+    }
+  }
+  ORT_CATCH(const std::exception& ex) {
+    closedir(dir);
+    ORT_RETHROW;
+  }
+  closedir(dir);
+}
 #else
 inline OrtFileType DTToFileType(unsigned char t) {
   switch (t) {

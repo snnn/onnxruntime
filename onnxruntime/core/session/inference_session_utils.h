@@ -12,13 +12,16 @@
 #include "core/graph/onnx_protobuf.h"
 #include "core/session/inference_session.h"
 #include "core/framework/session_options.h"
+#include "core/framework/tuning_results.h"
 #include "core/common/common.h"
 #include "nlohmann/json.hpp"
 using json = nlohmann::json;
 #endif
 
 namespace onnxruntime {
-
+namespace logging {
+class Logger;
+}
 namespace inference_session_utils {
 
 // need this value to be accessible in all builds in order to report error for attempted usage in a minimal build
@@ -30,6 +33,7 @@ static constexpr const char* kOrtLoadConfigFromModelEnvVar = "ORT_LOAD_CONFIG_FR
 //
 static constexpr const char* kOrtConfigKey = "ort_config";
 static constexpr const char* kSessionOptionsKey = "session_options";
+static constexpr const char* kTuningResultsKeys = "tuning_results";
 
 class JsonConfigParser {
  public:
@@ -55,6 +59,11 @@ class JsonConfigParser {
   // Flag indicating if an ort config json is available to be used
   bool is_ort_config_json_available_ = false;
 };
+
+Status ParseTuningResultsFromModelMetadata(const onnxruntime::ModelMetadata& metadata,
+                                           /*out*/ std::vector<TuningResults>& results,
+                                           /*out*/ bool& key_found,
+                                           const logging::Logger& logger);
 
 #endif  // !defined(ORT_MINIMAL_BUILD)
 

@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include "core/providers/shared_library/provider_api.h"
+#include "core/providers/common.h"
 #include "core/providers/cuda/math/binary_elementwise_ops.h"
 #include "core/providers/cuda/math/binary_elementwise_ops_impl.h"
 #include "core/providers/cuda/math/unary_elementwise_ops_impl.h"
@@ -18,34 +20,6 @@ Status BinaryElementwise<ShouldNotBroadcast>::Prepare(OpKernelContext* context, 
                            p->lhs_tensor->Shape().ToString(), " != ", p->rhs_tensor->Shape().ToString());
   p->output_tensor = context->Output(0, p->lhs_tensor->Shape());
   p->output_rank_or_simple_broadcast = static_cast<int32_t>(SimpleBroadcast::NoBroadcast);
-  return Status::OK();
-}
-
-Status ComputeOutputShape(const std::string& node_name, const TensorShape& lhs_shape, const TensorShape& rhs_shape, TensorShape& out_shape) {
-  size_t lhs_rank = lhs_shape.NumDimensions();
-  size_t rhs_rank = rhs_shape.NumDimensions();
-  size_t out_rank = std::max(lhs_rank, rhs_rank);
-
-  std::vector<int64_t> output_dims(out_rank, 0);
-  for (size_t i = 0; i < out_rank; ++i) {
-    int64_t lhs_dim = 1;
-    if (i < lhs_rank)
-      lhs_dim = lhs_shape[lhs_rank - 1 - i];
-    int64_t rhs_dim = 1;
-    if (i < rhs_rank)
-      rhs_dim = rhs_shape[rhs_rank - 1 - i];
-    int64_t max = std::max(lhs_dim, rhs_dim);
-    int64_t min = std::min(lhs_dim, rhs_dim);
-    int64_t out_dim = (min == 0 ? min : max);  // special case a dim value of 0.
-    if (lhs_dim != out_dim && lhs_dim != 1)
-      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, node_name, ": left operand cannot broadcast on dim ", lhs_rank - 1 - i,
-                             " LeftShape: ", lhs_shape.ToString(), ", RightShape: ", rhs_shape.ToString());
-    if (rhs_dim != out_dim && rhs_dim != 1)
-      return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, node_name, ": right operand cannot broadcast on dim ", rhs_rank - 1 - i,
-                             " LeftShape: ", lhs_shape.ToString(), ", RightShape: ", rhs_shape.ToString());
-    output_dims[out_rank - 1 - i] = out_dim;
-  }
-  out_shape = TensorShape(output_dims);
   return Status::OK();
 }
 
@@ -77,7 +51,7 @@ Status BinaryElementwise<ShouldBroadcast>::Prepare(OpKernelContext* context, Bin
   const auto& rhs_shape = rhs_tensor->Shape();
 
   TensorShape output_shape;
-  ORT_RETURN_IF_ERROR(ComputeOutputShape(Node().Name(), lhs_shape, rhs_shape, output_shape));
+  ORT_RETURN_IF_ERROR(ComputeBroadcastOutputShape(Node().Name(), lhs_shape, rhs_shape, output_shape));
   auto output_tensor = context->Output(0, output_shape);
 
   ORT_RETURN_IF_ERROR(BinaryElementwiseBroadcastPrepare(lhs_tensor, rhs_tensor, output_tensor, p));
@@ -117,6 +91,17 @@ Status BinaryElementwise<ShouldBroadcast>::Prepare(OpKernelContext* context, Bin
       (*KernelDefBuilder::Create()).TypeConstraint("T", DataTypeImpl::GetTensorType<T>()).TypeConstraint("T1", DataTypeImpl::GetTensorType<bool>()), \
       x<T>);
 
+#define BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_VERSIONED_TYPED(x, startver, endver, T)                                                         \
+  ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_EX(                                                                                                           \
+      x,                                                                                                                                             \
+      kOnnxDomain,                                                                                                                                   \
+      startver,                                                                                                                                      \
+      endver,                                                                                                                                        \
+      T,                                                                                                                                             \
+      kCudaExecutionProvider,                                                                                                                        \
+      (*KernelDefBuilder::Create()).TypeConstraint("T", DataTypeImpl::GetTensorType<T>()).TypeConstraint("T1", DataTypeImpl::GetTensorType<bool>()), \
+      x<T>);
+
 #define BINARY_ELEMENTWISE_REGISTER_KERNEL_VERSIONED_TYPED(x, startver, endver, T)         \
   ONNX_OPERATOR_VERSIONED_TYPED_KERNEL_EX(                                                 \
       x,                                                                                   \
@@ -139,24 +124,24 @@ Status BinaryElementwise<ShouldBroadcast>::Prepare(OpKernelContext* context, Bin
       (*KernelDefBuilder::Create()).TypeConstraint("T", DataTypeImpl::GetTensorType<T>()),           \
       class_name<T>);
 
-#define BINARY_ELEMENTWISE_COMPUTE(x, T)                                                                         \
-  template <>                                                                                                    \
-  Status x<T>::ComputeInternal(OpKernelContext* context) const {                                                 \
-    BinaryElementwisePreparation prepare;                                                                        \
-    ORT_RETURN_IF_ERROR(Prepare(context, &prepare));                                                             \
-    Impl_##x<typename ToCudaType<T>::MappedType>(                                                                \
-        Stream(),                                                                                                \
-        prepare.output_rank_or_simple_broadcast,                                                                 \
-        &prepare.lhs_padded_strides,                                                                             \
-        reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->template Data<T>()),     \
-        &prepare.rhs_padded_strides,                                                                             \
-        reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.rhs_tensor->template Data<T>()),     \
-        &prepare.fdm_output_strides,                                                                             \
-        prepare.fdm_H,                                                                                           \
-        prepare.fdm_C,                                                                                           \
-        reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->template MutableData<T>()), \
-        prepare.output_tensor->Shape().Size());                                                                  \
-    return Status::OK();                                                                                         \
+#define BINARY_ELEMENTWISE_COMPUTE(x, T)                                                                \
+  template <>                                                                                           \
+  Status x<T>::ComputeInternal(OpKernelContext* context) const {                                        \
+    BinaryElementwisePreparation prepare;                                                               \
+    ORT_RETURN_IF_ERROR(Prepare(context, &prepare));                                                    \
+    Impl_##x<typename ToCudaType<T>::MappedType>(                                                       \
+        Stream(context),                                                                                \
+        prepare.output_rank_or_simple_broadcast,                                                        \
+        &prepare.lhs_padded_strides,                                                                    \
+        reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->Data<T>()),     \
+        &prepare.rhs_padded_strides,                                                                    \
+        reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.rhs_tensor->Data<T>()),     \
+        &prepare.fdm_output_strides,                                                                    \
+        prepare.fdm_H,                                                                                  \
+        prepare.fdm_C,                                                                                  \
+        reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->MutableData<T>()), \
+        prepare.output_tensor->Shape().Size());                                                         \
+    return Status::OK();                                                                                \
   }
 
 #define BINARY_OP_VERSIONED_TYPED(name, startver, endver, T) \
@@ -215,11 +200,15 @@ Status BinaryElementwise<ShouldBroadcast>::Prepare(OpKernelContext* context, Bin
   BINARY_OP_TYPED(name, ver, double)    \
   BINARY_OP_TYPED(name, ver, BFloat16)
 
-#define BINARY_OP_UZILHFD(name, ver)   \
-  BINARY_OP_TYPED(name, ver, uint32_t) \
-  BINARY_OP_TYPED(name, ver, uint64_t) \
-  BINARY_OP_TYPED(name, ver, int32_t)  \
-  BINARY_OP_TYPED(name, ver, int64_t)  \
+#define BINARY_OP_BWUZCSILHFD(name, ver) \
+  BINARY_OP_TYPED(name, ver, uint8_t)    \
+  BINARY_OP_TYPED(name, ver, uint16_t)   \
+  BINARY_OP_TYPED(name, ver, uint32_t)   \
+  BINARY_OP_TYPED(name, ver, uint64_t)   \
+  BINARY_OP_TYPED(name, ver, int8_t)     \
+  BINARY_OP_TYPED(name, ver, int16_t)    \
+  BINARY_OP_TYPED(name, ver, int32_t)    \
+  BINARY_OP_TYPED(name, ver, int64_t)    \
   BINARY_OP_HFD(name, ver)
 
 #define BINARY_OP_REGISTER_VERSIONED_OIL(name, startver, endver)                      \
@@ -255,6 +244,16 @@ Status BinaryElementwise<ShouldBroadcast>::Prepare(OpKernelContext* context, Bin
   BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_TYPED(name, ver, double)    \
   BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_TYPED(name, ver, BFloat16)
 
+#define BINARY_LOGICALOP_REGISTER_VERSIONED_UZILHFD(name, startver, endver)                       \
+  BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_VERSIONED_TYPED(name, startver, endver, uint32_t)  \
+  BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_VERSIONED_TYPED(name, startver, endver, uint64_t)  \
+  BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_VERSIONED_TYPED(name, startver, endver, int32_t)   \
+  BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_VERSIONED_TYPED(name, startver, endver, int64_t)   \
+  BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_VERSIONED_TYPED(name, startver, endver, MLFloat16) \
+  BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_VERSIONED_TYPED(name, startver, endver, float)     \
+  BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_VERSIONED_TYPED(name, startver, endver, double)    \
+  BINARY_ELEMENTWISE_LOGICALOP_REGISTER_KERNEL_VERSIONED_TYPED(name, startver, endver, BFloat16)
+
 #define BINARY_OP_REGISTER_VERSIONED_HFD(name, startver, endver)                        \
   BINARY_ELEMENTWISE_REGISTER_KERNEL_VERSIONED_TYPED(name, startver, endver, MLFloat16) \
   BINARY_ELEMENTWISE_REGISTER_KERNEL_VERSIONED_TYPED(name, startver, endver, float)     \
@@ -284,17 +283,19 @@ BINARY_OP_VERSIONED_UZILHFD_WITH_BF16(Sub, 13, 13)
 BINARY_OP_VERSIONED_UZILHFD_WITH_BF16(Mul, 13, 13)
 BINARY_OP_VERSIONED_UZILHFD_WITH_BF16(Div, 13, 13)
 
-BINARY_OP_UZILHFD(Add, 14)
-BINARY_OP_UZILHFD(Sub, 14)
-BINARY_OP_UZILHFD(Mul, 14)
-BINARY_OP_UZILHFD(Div, 14)
+BINARY_OP_BWUZCSILHFD(Add, 14)
+BINARY_OP_BWUZCSILHFD(Sub, 14)
+BINARY_OP_BWUZCSILHFD(Mul, 14)
+BINARY_OP_BWUZCSILHFD(Div, 14)
 
 BINARY_OP_REGISTER_VERSIONED_CLASS_HFD(Pow, Pow_7, 7, 11)
 BINARY_LOGICALOP_TYPED(And, 7, bool)
 BINARY_LOGICALOP_TYPED(Or, 7, bool)
 BINARY_LOGICALOP_TYPED(Xor, 7, bool)
 BINARY_OP_VERSIONED_HFD(PRelu, 7, 8)
-BINARY_OP_HFD(PRelu, 9)
+BINARY_OP_VERSIONED_HFD(PRelu, 9, 15)
+// Opset-16 adds BFloat16 to allowed types for the PRelu operator
+BINARY_OP_HFD(PRelu, 16)
 
 // Pow since version 12
 ONNX_OPERATOR_VERSIONED_KERNEL_EX(
@@ -338,13 +339,13 @@ Status DispatchOnFirstArg(cudaStream_t stream, const BinaryElementwisePreparatio
           stream,
           prepare.output_rank_or_simple_broadcast,
           &prepare.lhs_padded_strides,
-          reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->template Data<T>()),
+          reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->Data<T>()),
           &prepare.rhs_padded_strides,
-          reinterpret_cast<const typename ToCudaType<int32_t>::MappedType*>(prepare.rhs_tensor->template Data<int32_t>()),
+          reinterpret_cast<const typename ToCudaType<int32_t>::MappedType*>(prepare.rhs_tensor->Data<int32_t>()),
           &prepare.fdm_output_strides,
           prepare.fdm_H,
           prepare.fdm_C,
-          reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->template MutableData<T>()),
+          reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->MutableData<T>()),
           prepare.output_tensor->Shape().Size());
       break;
     case on::TensorProto_DataType_INT64:
@@ -352,13 +353,13 @@ Status DispatchOnFirstArg(cudaStream_t stream, const BinaryElementwisePreparatio
           stream,
           prepare.output_rank_or_simple_broadcast,
           &prepare.lhs_padded_strides,
-          reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->template Data<T>()),
+          reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->Data<T>()),
           &prepare.rhs_padded_strides,
-          reinterpret_cast<const typename ToCudaType<int64_t>::MappedType*>(prepare.rhs_tensor->template Data<int64_t>()),
+          reinterpret_cast<const typename ToCudaType<int64_t>::MappedType*>(prepare.rhs_tensor->Data<int64_t>()),
           &prepare.fdm_output_strides,
           prepare.fdm_H,
           prepare.fdm_C,
-          reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->template MutableData<T>()),
+          reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->MutableData<T>()),
           prepare.output_tensor->Shape().Size());
       break;
     case on::TensorProto_DataType_FLOAT:
@@ -366,13 +367,13 @@ Status DispatchOnFirstArg(cudaStream_t stream, const BinaryElementwisePreparatio
           stream,
           prepare.output_rank_or_simple_broadcast,
           &prepare.lhs_padded_strides,
-          reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->template Data<T>()),
+          reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->Data<T>()),
           &prepare.rhs_padded_strides,
-          reinterpret_cast<const typename ToCudaType<float>::MappedType*>(prepare.rhs_tensor->template Data<float>()),
+          reinterpret_cast<const typename ToCudaType<float>::MappedType*>(prepare.rhs_tensor->Data<float>()),
           &prepare.fdm_output_strides,
           prepare.fdm_H,
           prepare.fdm_C,
-          reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->template MutableData<T>()),
+          reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->MutableData<T>()),
           prepare.output_tensor->Shape().Size());
       break;
     case on::TensorProto_DataType_DOUBLE:
@@ -380,13 +381,13 @@ Status DispatchOnFirstArg(cudaStream_t stream, const BinaryElementwisePreparatio
           stream,
           prepare.output_rank_or_simple_broadcast,
           &prepare.lhs_padded_strides,
-          reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->template Data<T>()),
+          reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->Data<T>()),
           &prepare.rhs_padded_strides,
-          reinterpret_cast<const typename ToCudaType<double>::MappedType*>(prepare.rhs_tensor->template Data<double>()),
+          reinterpret_cast<const typename ToCudaType<double>::MappedType*>(prepare.rhs_tensor->Data<double>()),
           &prepare.fdm_output_strides,
           prepare.fdm_H,
           prepare.fdm_C,
-          reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->template MutableData<T>()),
+          reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->MutableData<T>()),
           prepare.output_tensor->Shape().Size());
       break;
     case on::TensorProto_DataType_FLOAT16:
@@ -394,13 +395,13 @@ Status DispatchOnFirstArg(cudaStream_t stream, const BinaryElementwisePreparatio
           stream,
           prepare.output_rank_or_simple_broadcast,
           &prepare.lhs_padded_strides,
-          reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->template Data<T>()),
+          reinterpret_cast<const typename ToCudaType<T>::MappedType*>(prepare.lhs_tensor->Data<T>()),
           &prepare.rhs_padded_strides,
-          reinterpret_cast<const typename ToCudaType<MLFloat16>::MappedType*>(prepare.rhs_tensor->template Data<MLFloat16>()),
+          reinterpret_cast<const typename ToCudaType<MLFloat16>::MappedType*>(prepare.rhs_tensor->Data<MLFloat16>()),
           &prepare.fdm_output_strides,
           prepare.fdm_H,
           prepare.fdm_C,
-          reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->template MutableData<T>()),
+          reinterpret_cast<typename ToCudaType<T>::MappedType*>(prepare.output_tensor->MutableData<T>()),
           prepare.output_tensor->Shape().Size());
       break;
     default:
@@ -421,19 +422,19 @@ Status Pow::ComputeInternal(OpKernelContext* context) const {
 
   switch (prepare.lhs_tensor->GetElementType()) {
     case on::TensorProto_DataType_INT32:
-      s = DispatchOnFirstArg<int32_t>(Stream(), prepare);
+      s = DispatchOnFirstArg<int32_t>(Stream(context), prepare);
       break;
     case on::TensorProto_DataType_INT64:
-      s = DispatchOnFirstArg<int64_t>(Stream(), prepare);
+      s = DispatchOnFirstArg<int64_t>(Stream(context), prepare);
       break;
     case on::TensorProto_DataType_FLOAT:
-      s = DispatchOnFirstArg<float>(Stream(), prepare);
+      s = DispatchOnFirstArg<float>(Stream(context), prepare);
       break;
     case on::TensorProto_DataType_DOUBLE:
-      s = DispatchOnFirstArg<double>(Stream(), prepare);
+      s = DispatchOnFirstArg<double>(Stream(context), prepare);
       break;
     case on::TensorProto_DataType_FLOAT16:
-      s = DispatchOnFirstArg<MLFloat16>(Stream(), prepare);
+      s = DispatchOnFirstArg<MLFloat16>(Stream(context), prepare);
       break;
     default:
       s = ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT, "Unsupported X type: ",
@@ -442,31 +443,94 @@ Status Pow::ComputeInternal(OpKernelContext* context) const {
   return s;
 }
 
-//Greater op output tensor type is bool, so it cannot directly fit in the macros
-//for other elementwise ops
+ONNX_OPERATOR_VERSIONED_KERNEL_EX(
+    Mod, kOnnxDomain, 10, 12, kCudaExecutionProvider,
+    (*KernelDefBuilder::Create())
+        .TypeConstraint("T",
+                        BuildKernelDefConstraints<int32_t, int64_t, uint32_t, uint64_t, float, double, MLFloat16>()),
+    Mod);
+
+ONNX_OPERATOR_KERNEL_EX(Mod, kOnnxDomain, 13, kCudaExecutionProvider,
+                        (*KernelDefBuilder::Create())
+                            .TypeConstraint("T", BuildKernelDefConstraints<int32_t, int64_t, uint32_t, uint64_t, float,
+                                                                           double, MLFloat16, BFloat16>()),
+                        Mod);
+
+Status Mod::ComputeInternal(OpKernelContext* context) const {
+  namespace on = ONNX_NAMESPACE;
+  BinaryElementwisePreparation prepare;
+  ORT_RETURN_IF_ERROR(Prepare(context, &prepare));
+  auto element_type = prepare.lhs_tensor->GetElementType();
+  ORT_ENFORCE(fmod_ || element_type == on::TensorProto_DataType_INT32 ||
+                  element_type == on::TensorProto_DataType_INT64 || element_type == on::TensorProto_DataType_UINT32 ||
+                  element_type == on::TensorProto_DataType_UINT64,
+              "Non-fmod can support integer types only.");
+#define CASE_MOD_ELEMENT_TYPE(name, onnx_type, data_type)                                                           \
+  case onnx_type: {                                                                                                 \
+    Impl_##name<typename ToCudaType<data_type>::MappedType>(                                                        \
+        Stream(context), prepare.output_rank_or_simple_broadcast, &prepare.lhs_padded_strides,                      \
+        reinterpret_cast<const typename ToCudaType<data_type>::MappedType*>(prepare.lhs_tensor->Data<data_type>()), \
+        &prepare.rhs_padded_strides,                                                                                \
+        reinterpret_cast<const typename ToCudaType<data_type>::MappedType*>(prepare.rhs_tensor->Data<data_type>()), \
+        &prepare.fdm_output_strides, prepare.fdm_H, prepare.fdm_C,                                                  \
+        reinterpret_cast<typename ToCudaType<data_type>::MappedType*>(                                              \
+            prepare.output_tensor->MutableData<data_type>()),                                                       \
+        prepare.output_tensor->Shape().Size());                                                                     \
+  } break
+  if (fmod_) {
+    switch (element_type) {
+      CASE_MOD_ELEMENT_TYPE(Fmod, on::TensorProto_DataType_INT32, int32_t);
+      CASE_MOD_ELEMENT_TYPE(Fmod, on::TensorProto_DataType_INT64, int64_t);
+      CASE_MOD_ELEMENT_TYPE(Fmod, on::TensorProto_DataType_UINT32, uint32_t);
+      CASE_MOD_ELEMENT_TYPE(Fmod, on::TensorProto_DataType_UINT64, uint64_t);
+      CASE_MOD_ELEMENT_TYPE(Fmod, on::TensorProto_DataType_FLOAT, float);
+      CASE_MOD_ELEMENT_TYPE(Fmod, on::TensorProto_DataType_DOUBLE, double);
+      CASE_MOD_ELEMENT_TYPE(Fmod, on::TensorProto_DataType_FLOAT16, MLFloat16);
+      CASE_MOD_ELEMENT_TYPE(Fmod, on::TensorProto_DataType_BFLOAT16, BFloat16);
+      default:
+        return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                               "Unsupported element type: ", DataTypeImpl::ToString(prepare.lhs_tensor->DataType()));
+    }
+  } else {
+    switch (element_type) {
+      CASE_MOD_ELEMENT_TYPE(Mod, on::TensorProto_DataType_INT32, int32_t);
+      CASE_MOD_ELEMENT_TYPE(Mod, on::TensorProto_DataType_INT64, int64_t);
+      CASE_MOD_ELEMENT_TYPE(Mod, on::TensorProto_DataType_UINT32, uint32_t);
+      CASE_MOD_ELEMENT_TYPE(Mod, on::TensorProto_DataType_UINT64, uint64_t);
+      default:
+        return ORT_MAKE_STATUS(ONNXRUNTIME, INVALID_ARGUMENT,
+                               "Unsupported element type: ", DataTypeImpl::ToString(prepare.lhs_tensor->DataType()));
+    }
+  }
+#undef CASE_MOD_ELEMENT_TYPE
+  return Status::OK();
+}
+
+// Greater op output tensor type is bool, so it cannot directly fit in the macros
+// for other elementwise ops
 template <typename T, typename CudaT>
 Status CompareFunction<T, CudaT>::CompareMethod(OpKernelContext* context, ImplCompare Impl_Compare) const {
   BinaryElementwisePreparation prepare;
   ORT_RETURN_IF_ERROR(Prepare(context, &prepare));
 
   Impl_Compare(
-      Stream(),
+      Stream(context),
       prepare.output_rank_or_simple_broadcast,
       &prepare.lhs_padded_strides,
-      reinterpret_cast<const CudaT*>(prepare.lhs_tensor->template Data<T>()),
+      reinterpret_cast<const CudaT*>(prepare.lhs_tensor->Data<T>()),
       &prepare.rhs_padded_strides,
-      reinterpret_cast<const CudaT*>(prepare.rhs_tensor->template Data<T>()),
+      reinterpret_cast<const CudaT*>(prepare.rhs_tensor->Data<T>()),
       &prepare.fdm_output_strides,
       prepare.fdm_H,
       prepare.fdm_C,
-      reinterpret_cast<ToCudaType<bool>::MappedType*>(prepare.output_tensor->template MutableData<bool>()),
+      reinterpret_cast<ToCudaType<bool>::MappedType*>(prepare.output_tensor->MutableData<bool>()),
       prepare.output_tensor->Shape().Size());
 
   return Status::OK();
 }
 
-//Greater op output tensor type is bool, so it cannot directly fit in the macros
-//for other elementwise ops
+// Greater op output tensor type is bool, so it cannot directly fit in the macros
+// for other elementwise ops
 template <typename T>
 Status Greater<T>::ComputeInternal(OpKernelContext* context) const {
   return this->CompareMethod(context, &ImplT2_Greater);
@@ -477,22 +541,22 @@ Status Equal<T>::ComputeInternal(OpKernelContext* context) const {
   return this->CompareMethod(context, &ImplT2_Equal);
 }
 
-//Less op output tensor type is bool, so it cannot directly fit in the macros
-//for other elementwise ops
+// Less op output tensor type is bool, so it cannot directly fit in the macros
+// for other elementwise ops
 template <typename T>
 Status Less<T>::ComputeInternal(OpKernelContext* context) const {
   return this->CompareMethod(context, &ImplT2_Less);
 }
 
-//GreaterOrEqual op output tensor type is bool, so it cannot directly fit in the macros
-//for other elementwise ops
+// GreaterOrEqual op output tensor type is bool, so it cannot directly fit in the macros
+// for other elementwise ops
 template <typename T>
 Status GreaterOrEqual<T>::ComputeInternal(OpKernelContext* context) const {
   return this->CompareMethod(context, &ImplT2_GreaterOrEqual);
 }
 
-//LessOrEqual op output tensor type is bool, so it cannot directly fit in the macros
-//for other elementwise ops
+// LessOrEqual op output tensor type is bool, so it cannot directly fit in the macros
+// for other elementwise ops
 template <typename T>
 Status LessOrEqual<T>::ComputeInternal(OpKernelContext* context) const {
   return this->CompareMethod(context, &ImplT2_LessOrEqual);
@@ -509,8 +573,14 @@ BINARY_OP_REGISTER_VERSIONED_HFD(Greater, 7, 8)
 BINARY_LOGICALOP_REGISTER_UZILHFD(Less, 13)
 BINARY_OP_REGISTER_VERSIONED_UZILHFD(Less, 9, 12)
 BINARY_OP_REGISTER_VERSIONED_HFD(Less, 7, 8)
-BINARY_LOGICALOP_REGISTER_UZILHFD(GreaterOrEqual, 12)
-BINARY_LOGICALOP_REGISTER_UZILHFD(LessOrEqual, 12)
+BINARY_LOGICALOP_REGISTER_VERSIONED_UZILHFD(GreaterOrEqual, 12, 15)
+BINARY_LOGICALOP_REGISTER_VERSIONED_UZILHFD(LessOrEqual, 12, 15)
+
+// Opset-16 adds BFloat16 to allowed types for the GreaterOrEqual operator
+BINARY_LOGICALOP_REGISTER_UZILHFD(GreaterOrEqual, 16)
+
+// Opset-16 adds BFloat16 to allowed types for the LessOrEqual operator
+BINARY_LOGICALOP_REGISTER_UZILHFD(LessOrEqual, 16)
 
 }  // namespace cuda
 }  // namespace onnxruntime

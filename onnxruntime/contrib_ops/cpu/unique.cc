@@ -8,7 +8,7 @@
 #pragma warning(disable : 4996)
 #endif
 #include "unique.h"
-#include "core/framework/inlined_containers.h"
+#include "core/common/inlined_containers.h"
 #include "core/providers/cpu/tensor/utils.h"
 
 namespace onnxruntime {
@@ -35,18 +35,19 @@ Status Unique<float>::Compute(OpKernelContext* ctx) const {
 
   // 'idx' output has same output shape as input
   Tensor* output_idx = ctx->Output(1, input->Shape());
-  int64_t* output_idx_data = output_idx->template MutableData<int64_t>();
+  int64_t* output_idx_data = output_idx->MutableData<int64_t>();
 
   struct ElementData {
-    int64_t input_pos_; // original index
+    int64_t input_pos_;  // original index
     int64_t output_pos_;
-    int64_t count_; // number of times encountered
+    int64_t count_;  // number of times encountered
   };
 
   // XXX: Refactoring for less memory allocations. unordered_map
   // used originally for float uniqueness, is this correct?
   using IndexingMap = InlinedHashMap<float, ElementData>;
-  IndexingMap mapped_indices(num_elements);
+  IndexingMap mapped_indices;
+  mapped_indices.reserve(onnxruntime::narrow<size_t>(num_elements));
 
   // processing
   for (int64_t i = 0; i < num_elements; ++i) {
@@ -67,11 +68,11 @@ Status Unique<float>::Compute(OpKernelContext* ctx) const {
   // 'uniques' output
   TensorShape output_shape({static_cast<int64_t>(mapped_indices.size())});
   Tensor* output_uniques = ctx->Output(0, output_shape);
-  float* output_uniques_data = output_uniques->template MutableData<float>();
+  float* output_uniques_data = output_uniques->MutableData<float>();
 
   // 'counts' output
   Tensor* output_counts = ctx->Output(2, output_shape);
-  int64_t* output_counts_data = output_counts->template MutableData<int64_t>();
+  int64_t* output_counts_data = output_counts->MutableData<int64_t>();
 
   for (const auto& e : mapped_indices) {
     // 'uniques' data

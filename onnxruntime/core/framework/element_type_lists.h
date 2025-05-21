@@ -9,7 +9,9 @@
 #include "boost/mp11.hpp"
 
 #include "core/common/type_list.h"
+#include "core/framework/float8.h"
 #include "core/framework/float16.h"
+#include "core/framework/int4.h"
 
 namespace onnxruntime {
 
@@ -17,7 +19,7 @@ namespace onnxruntime {
 // Element type refers to the element type of a Tensor, Sequence, etc.
 namespace element_type_lists {
 
-using AllFixedSizeExceptHalf =
+using AllFixedSizeExceptHalfIRv4 =
     TypeList<
         float,
         double,
@@ -31,7 +33,9 @@ using AllFixedSizeExceptHalf =
         uint8_t,
         bool>;
 
-using AllFixedSize =
+using AllFixedSizeExceptHalf = AllFixedSizeExceptHalfIRv4;
+
+using AllFixedSizeIRv4 =
     TypeList<
         float,
         double,
@@ -47,15 +51,54 @@ using AllFixedSize =
         BFloat16,
         bool>;
 
-using All =
+#if !defined(DISABLE_FLOAT8_TYPES)
+using AllFixedSizeIRv9 =
     boost::mp11::mp_push_back<
-        AllFixedSize,
+        AllFixedSizeIRv4,
+        Float8E4M3FN,
+        Float8E4M3FNUZ,
+        Float8E5M2,
+        Float8E5M2FNUZ>;
+#else
+using AllFixedSizeIRv9 = AllFixedSizeIRv4;
+#endif
+
+using AllFixedSize = AllFixedSizeIRv4;
+
+using AllIRv4 =
+    boost::mp11::mp_push_back<
+        AllFixedSizeIRv4,
         std::string>;
 
-using AllIeeeFloatExceptHalf =
+#if !defined(DISABLE_FLOAT8_TYPES)
+using AllIRv9 =
+    boost::mp11::mp_push_back<
+        AllIRv4,
+        Float8E4M3FN,
+        Float8E4M3FNUZ,
+        Float8E5M2,
+        Float8E5M2FNUZ>;
+
+#else
+using AllIRv9 = AllIRv4;
+#endif
+
+using AllIRv10 =
+    boost::mp11::mp_push_back<
+        AllIRv9,
+        UInt4x2,
+        Int4x2>;
+
+using All = AllIRv4;
+
+#if !defined(DISABLE_FLOAT8_TYPES)
+using AllFloat8 =
     TypeList<
-        float,
-        double>;
+        Float8E4M3FN,
+        Float8E4M3FNUZ,
+        Float8E5M2,
+        Float8E5M2FNUZ>;
+#endif
 
 using AllIeeeFloat =
     TypeList<
@@ -63,7 +106,7 @@ using AllIeeeFloat =
         double,
         MLFloat16>;
 
-using AllNumeric =
+using AllNumericIRv4 =
     TypeList<
         float,
         double,
@@ -77,6 +120,8 @@ using AllNumeric =
         uint8_t,
         MLFloat16,
         BFloat16>;
+
+using AllNumeric = AllNumericIRv4;
 
 }  // namespace element_type_lists
 

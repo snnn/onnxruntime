@@ -3,7 +3,7 @@
 
 #pragma once
 
-#include "core/providers/cuda/cuda_common.h"
+#include <cuda.h>
 
 namespace onnxruntime {
 namespace contrib {
@@ -17,7 +17,7 @@ class AutoDestoryCudaEvent {
 
   ~AutoDestoryCudaEvent() {
     if (cuda_event_ != nullptr)
-      cudaEventDestroy(cuda_event_);
+      (void)cudaEventDestroy(cuda_event_);
   }
 
   cudaEvent_t& Get() {

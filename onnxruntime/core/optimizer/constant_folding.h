@@ -24,14 +24,34 @@ class ConstantFolding : public GraphTransformer {
   */
   ConstantFolding(const IExecutionProvider& execution_provider,
                   bool skip_dequantize_linear,
-                  const std::unordered_set<std::string>& compatible_execution_providers = {},
-                  const std::unordered_set<std::string>& excluded_initializers = {}) noexcept;
+                  const ConfigOptions& config_options,
+                  const InlinedHashSet<std::string_view>& compatible_execution_providers = {},
+                  const InlinedHashSet<std::string>& excluded_initializers = {}) noexcept;
+
+ protected:
+  /**
+   * Same as the constructor above but with a name provided by derived class.
+   */
+  ConstantFolding(const std::string& name,
+                  const IExecutionProvider& execution_provider,
+                  bool skip_dequantize_linear,
+                  const ConfigOptions& config_options,
+                  const InlinedHashSet<std::string_view>& compatible_execution_providers = {},
+                  const InlinedHashSet<std::string>& excluded_initializers = {}) noexcept;
+  /**
+   * Derived class can implement this virtual function to limit the nodes that can be constant folded.
+   */
+  virtual bool AllowConstantFolding(const Node& node) const {
+    ORT_UNUSED_PARAMETER(node);
+    return true;
+  }
 
  private:
   Status ApplyImpl(Graph& graph, bool& modified, int graph_level, const logging::Logger& logger) const override;
 
   bool skip_dequantize_linear_;
-  const std::unordered_set<std::string> excluded_initializers_;
+  const ConfigOptions& config_options_;
+  const InlinedHashSet<std::string> excluded_initializers_;
   const IExecutionProvider& execution_provider_;
 };
 

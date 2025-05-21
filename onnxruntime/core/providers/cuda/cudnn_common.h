@@ -1,14 +1,25 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
+// Copyright (c) 2023 NVIDIA Corporation.
 // Licensed under the MIT License.
 
 #pragma once
 
 #include <cfloat>
+#include <vector>
+#include <string>
 
 #include "core/providers/cuda/cuda_common.h"
+#include "core/providers/cuda/shared_inc/cudnn_fe_call.h"
+
+#ifndef USE_CUDA_MINIMAL
+#if !defined(__CUDACC__)
+#include <cudnn_frontend.h>
+#endif
 
 namespace onnxruntime {
 namespace cuda {
+
+#define CUDNN_FE_RETURN_IF_ERROR(expr) ORT_RETURN_IF_ERROR(CUDNN_FE_CALL(expr))
 
 class CudnnTensor final {
  public:
@@ -16,17 +27,20 @@ class CudnnTensor final {
   ~CudnnTensor();
   ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(CudnnTensor);
 
-  Status Set(gsl::span<const int64_t> input_dims, cudnnDataType_t dataType);
+  Status Set(gsl::span<const int64_t> input_dims, cudnnDataType_t dataType, bool is_nhwc = false);
   Status Set(const CudnnTensor& x_desc, cudnnBatchNormMode_t mode);
+  Status Set(gsl::span<const int64_t> input_dims, cudnnDataType_t dataType, gsl::span<const int64_t> input_strides);
+  // Set 4D tensor format (for NHWC)
+  Status Set(cudnnTensorFormat_t format, cudnnDataType_t dataType, int n, int c, int h, int w);
 
   operator cudnnTensorDescriptor_t() const { return tensor_; }
+
+  Status CreateTensorIfNeeded();
 
   template <typename T>
   static cudnnDataType_t GetDataType();
 
  private:
-  Status CreateTensorIfNeeded();
-
   cudnnTensorDescriptor_t tensor_;
 };
 
@@ -57,6 +71,9 @@ class CudnnFilterDescriptor final {
   ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(CudnnFilterDescriptor);
 
   Status Set(gsl::span<const int64_t> filter_dims, cudnnDataType_t data_typ);
+
+  // Set 4D filter where k is output channels, c is input channels, h and w is rows and columns per filter.
+  Status Set(cudnnTensorFormat_t format, cudnnDataType_t dataType, int k, int c, int h, int w);
 
   operator cudnnFilterDescriptor_t() const { return desc_; }
 
@@ -133,11 +150,143 @@ struct Consts<BFloat16> {
 inline double ClampCudnnBatchNormEpsilon(double epsilon) {
   if (epsilon < CUDNN_BN_MIN_EPSILON) {
     if (CUDNN_BN_MIN_EPSILON - epsilon > FLT_EPSILON)
-      LOGS_DEFAULT(WARNING) << "Provided epsilon is smaller than CUDNN_BN_MIN_EPSILON. Setting it to CUDNN_BN_MIN_EPSILON";
+      LOGS_DEFAULT(WARNING) << "Provided epsilon is smaller than CUDNN_BN_MIN_EPSILON. "
+                            << "Setting it to CUDNN_BN_MIN_EPSILON";
     return CUDNN_BN_MIN_EPSILON;
   }
   return epsilon;
 }
 
+inline cudnnStatus_t
+BatchNormalizationForwardInferenceHelper(cudnnHandle_t handle,
+                                         cudnnBatchNormMode_t mode,
+                                         const void* alpha,
+                                         const void* beta,
+                                         const cudnnTensorDescriptor_t xDesc,
+                                         const void* x,
+                                         const cudnnTensorDescriptor_t yDesc,
+                                         void* y,
+                                         const cudnnTensorDescriptor_t bnScaleBiasMeanVarDesc,
+                                         const void* bnScale,
+                                         const void* bnBias,
+                                         const void* estimatedMean,
+                                         const void* estimatedVariance,
+                                         double epsilon) {
+  return cudnnBatchNormalizationForwardInference(handle,
+                                                 mode,
+                                                 alpha,
+                                                 beta,
+                                                 xDesc,
+                                                 x,
+                                                 yDesc,
+                                                 y,
+                                                 bnScaleBiasMeanVarDesc,
+                                                 bnScale,
+                                                 bnBias,
+                                                 estimatedMean,
+                                                 estimatedVariance,
+                                                 epsilon);
+}
+
+inline cudnnStatus_t
+BatchNormalizationForwardTrainingHelper(cudnnHandle_t handle,
+                                        cudnnBatchNormMode_t mode,
+                                        const void* alpha,
+                                        const void* beta,
+                                        const cudnnTensorDescriptor_t xDesc,
+                                        const void* x,
+                                        const cudnnTensorDescriptor_t yDesc,
+                                        void* y,
+                                        const cudnnTensorDescriptor_t bnScaleBiasMeanVarDesc,
+                                        const void* bnScale,
+                                        const void* bnBias,
+                                        double exponentialAverageFactor,
+                                        void* resultRunningMean,
+                                        void* resultRunningVariance,
+                                        double epsilon,
+                                        void* resultSaveMean,
+                                        void* resultSaveInvVariance) {
+  return cudnnBatchNormalizationForwardTraining(handle,
+                                                mode,
+                                                alpha,
+                                                beta,
+                                                xDesc,
+                                                x,
+                                                yDesc,
+                                                y,
+                                                bnScaleBiasMeanVarDesc,
+                                                bnScale,
+                                                bnBias,
+                                                exponentialAverageFactor,
+                                                resultRunningMean,
+                                                resultRunningVariance,
+                                                epsilon,
+                                                resultSaveMean,
+                                                resultSaveInvVariance);
+}
+
+inline cudnnStatus_t
+LRNCrossChannelForwardHelper(cudnnHandle_t handle,
+                             cudnnLRNDescriptor_t normDesc,
+                             cudnnLRNMode_t lrnMode,
+                             const void* alpha,
+                             const cudnnTensorDescriptor_t xDesc,
+                             const void* x,
+                             const void* beta,
+                             const cudnnTensorDescriptor_t yDesc,
+                             void* y) {
+  return cudnnLRNCrossChannelForward(handle, normDesc, lrnMode, alpha, xDesc, x, beta, yDesc, y);
+}
+
+inline cudnnStatus_t
+SetLRNDescriptorHelper(cudnnLRNDescriptor_t normDesc,
+                       unsigned lrnN,
+                       double lrnAlpha,
+                       double lrnBeta,
+                       double lrnK) {
+  return cudnnSetLRNDescriptor(normDesc, lrnN, lrnAlpha, lrnBeta, lrnK);
+}
+
+inline cudnnStatus_t
+PoolingForwardHelper(cudnnHandle_t handle,
+                     const cudnnPoolingDescriptor_t poolingDesc,
+                     const void* alpha,
+                     const cudnnTensorDescriptor_t xDesc,
+                     const void* x,
+                     const void* beta,
+                     const cudnnTensorDescriptor_t yDesc,
+                     void* y) {
+  return cudnnPoolingForward(handle, poolingDesc, alpha, xDesc, x, beta, yDesc, y);
+}
+
+inline cudnnStatus_t
+SetPoolingNdDescriptorHelper(cudnnPoolingDescriptor_t poolingDesc,
+                             const cudnnPoolingMode_t mode,
+                             const cudnnNanPropagation_t maxpoolingNanOpt,
+                             int nbDims,
+                             const int windowDimA[],
+                             const int paddingA[],
+                             const int strideA[]) {
+  return cudnnSetPoolingNdDescriptor(poolingDesc, mode, maxpoolingNanOpt, nbDims, windowDimA, paddingA, strideA);
+}
+
+std::vector<int64_t> generateStrides(const std::vector<int64_t>& shape, bool channels_last);
+
+#if !defined(__CUDACC__)
+class CudnnFeTensor final {
+ public:
+  CudnnFeTensor(const onnxruntime::TensorShapeVector& shape, const std::string& name,
+                std::optional<cudnn_frontend::DataType_t> dtype, const bool nhwc);
+
+  template <typename T>
+  static cudnn_frontend::DataType_t GetDataType();
+  cudnn_frontend::graph::Tensor_attributes Get() { return tensor_; }
+
+ private:
+  cudnn_frontend::graph::Tensor_attributes tensor_;
+};
+#endif
+
 }  // namespace cuda
 }  // namespace onnxruntime
+#endif

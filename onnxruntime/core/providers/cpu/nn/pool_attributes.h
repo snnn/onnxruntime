@@ -1,4 +1,5 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
+// Copyright (c) 2023 NVIDIA Corporation.
 // Licensed under the MIT License.
 
 #pragma once
@@ -23,7 +24,6 @@ struct PoolAttributes {
   // Shared providers don't know about OpNodeProtoHelper
   PoolAttributes(const OpKernelInfo& info,
 #else
-  // Providers like Nuphar don't know about OpKernelInfo
   PoolAttributes(const OpNodeProtoHelper<ProtoHelperNodeContext>& info,
 #endif
                  const std::string& op_name, int start_version)
@@ -36,7 +36,9 @@ struct PoolAttributes {
                 "No kernel shape is set.");
 
     std::string auto_padding;
-    ORT_ENFORCE(info.GetAttr<std::string>("auto_pad", &auto_padding).IsOK());
+    if (op_name != "MaxUnpool") {
+      ORT_ENFORCE(info.GetAttr<std::string>("auto_pad", &auto_padding).IsOK());
+    }
     auto_pad = StringToAutoPadType(auto_padding);
 
     if (!info.GetAttrs("pads", pads).IsOK() || pads.empty()) {
@@ -92,33 +94,39 @@ struct PoolAttributes {
   TensorShapeVector strides;
   TensorShapeVector dilations;  // Introduced in MaxPool_10
   // default_dilations is true if dilations is not set or all dilations are 1
-  bool default_dilations;
-  AutoPadType auto_pad;
+  bool default_dilations{false};
+  AutoPadType auto_pad{AutoPadType::NOTSET};
 
   TensorShapeVector SetOutputSize(const TensorShape& input_shape,
-                                     int64_t output_channel,
-                                     TensorShapeVector* actual_pads) const {
+                                  int64_t output_channel,
+                                  TensorShapeVector* actual_pads,
+                                  bool is_nhwc = false) const {
     ORT_ENFORCE(input_shape.Size() > 0 || input_shape[0] == 0,
                 "Invalid input shape. Only N can be zero. Got:", input_shape);
     TensorShapeVector output_dims;
     int64_t N = input_shape[0];
-    InferOutputSize(input_shape.GetDims(), &output_dims, actual_pads);
-
-    output_dims.insert(output_dims.begin(), {N, output_channel});
-
+    InferOutputSize(input_shape.GetDims(), &output_dims, actual_pads, is_nhwc);
+    if (is_nhwc) {
+      output_dims.insert(output_dims.begin(), N);
+      output_dims.push_back(output_channel);
+    } else {
+      output_dims.insert(output_dims.begin(), {N, output_channel});
+    }
     return output_dims;
   }
 
   void InferOutputSize(gsl::span<const int64_t> input_dims,
                        TensorShapeVector* output_dims,
-                       TensorShapeVector* actual_pads) const {
+                       TensorShapeVector* actual_pads,
+                       bool is_nhwc = false) const {
     ORT_ENFORCE(input_dims.size() >= 2);
     if (global_pooling) {
       output_dims->assign(input_dims.size() - 2, 1);
     } else {
       for (size_t dim = 0; dim < input_dims.size() - 2; ++dim) {
         int64_t dim_size = 0;
-        ComputeSizePadDilations(static_cast<int>(input_dims[dim + 2]),
+        auto spatial_dim = is_nhwc ? input_dims[dim + 1] : input_dims[dim + 2];
+        ComputeSizePadDilations(static_cast<int>(spatial_dim),
                                 strides[dim],
                                 kernel_shape[dim],
                                 &actual_pads->at(dim),
@@ -142,14 +150,14 @@ struct PoolAttributes {
         case AutoPadType::VALID:
           *pad_head = 0;
           *pad_tail = 0;
-          *out_size = ComputeOutputSize(in_size, stride, kernel, 0, dilation);
+          *out_size = ComputeOutputSize(in_size, stride, kernel, 0, 0, dilation);
           break;
         case AutoPadType::SAME_LOWER: {
           int64_t legacy_target_size = (in_size + stride - 1) / stride;
           int64_t pad_needed = (legacy_target_size - 1) * stride + kernel - in_size;
           *pad_head = (pad_needed + 1) / 2;
           *pad_tail = pad_needed - *pad_head;
-          *out_size = ComputeOutputSize(in_size, stride, kernel, pad_needed, dilation);
+          *out_size = ComputeOutputSize(in_size, stride, kernel, *pad_head, *pad_tail, dilation);
           break;
         }
         case AutoPadType::SAME_UPPER: {
@@ -157,7 +165,7 @@ struct PoolAttributes {
           int64_t pad_needed = (legacy_target_size - 1) * stride + kernel - in_size;
           *pad_head = pad_needed / 2;
           *pad_tail = pad_needed - *pad_head;
-          *out_size = ComputeOutputSize(in_size, stride, kernel, pad_needed, dilation);
+          *out_size = ComputeOutputSize(in_size, stride, kernel, *pad_head, *pad_tail, dilation);
           break;
         }
         default: {
@@ -165,7 +173,7 @@ struct PoolAttributes {
         }
       }
     } else {
-      *out_size = ComputeOutputSize(in_size, stride, kernel, *pad_head + *pad_tail, dilation);
+      *out_size = ComputeOutputSize(in_size, stride, kernel, *pad_head, *pad_tail, dilation);
     }
   }
 #if defined(_MSC_VER) && !defined(__clang__)
@@ -176,13 +184,21 @@ struct PoolAttributes {
   int64_t ComputeOutputSize(int64_t in_size,
                             int64_t stride,
                             int64_t kernel,
-                            int64_t pad_needed,
+                            int64_t pad_head,
+                            int64_t pad_tail,
                             int64_t dilation) const {
-    if (ceil_mode == 0) {
-      return static_cast<int64_t>(static_cast<float>(in_size + pad_needed - dilation * (kernel - 1) - 1) / stride + 1);
+    int64_t numerator = in_size + pad_head + pad_tail - dilation * (kernel - 1) - 1;
+    int64_t out_size = numerator / stride + 1;
+
+    if (ceil_mode == 1) {
+      out_size = static_cast<int64_t>(std::ceil(static_cast<float>(numerator) / stride)) + 1;
+      // Ensure that the last pooling starts inside the image (at least 1 pixel)
+      // Reference: https://github.com/onnx/onnx/pull/5741
+      if ((out_size - 1) * stride >= in_size + pad_head) {
+        --out_size;
+      }
     }
-    return static_cast<int64_t>(
-        std::ceil(static_cast<float>(in_size + pad_needed - dilation * (kernel - 1) - 1) / stride + 1));
+    return out_size;
   }
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma warning(pop)

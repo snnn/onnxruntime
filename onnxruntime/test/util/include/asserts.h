@@ -5,6 +5,7 @@
 
 #include "core/common/status.h"
 #include "gtest/gtest.h"
+#include "gmock/gmock.h"
 
 // helpers to run a function and check the status, outputting any error if it fails.
 // note: wrapped in do{} while(false) so the _tmp_status variable has limited scope
@@ -30,4 +31,18 @@
   do {                                 \
     Status _tmp_status = (function);   \
     EXPECT_FALSE(_tmp_status.IsOK());  \
+  } while (false)
+
+#define ASSERT_STATUS_NOT_OK_AND_HAS_SUBSTR(function, msg)              \
+  do {                                                                  \
+    Status _tmp_status = (function);                                    \
+    ASSERT_FALSE(_tmp_status.IsOK());                                   \
+    ASSERT_THAT(_tmp_status.ErrorMessage(), ::testing::HasSubstr(msg)); \
+  } while (false)
+
+#define EXPECT_STATUS_NOT_OK_AND_HAS_SUBSTR(function, msg)              \
+  do {                                                                  \
+    Status _tmp_status = (function);                                    \
+    EXPECT_FALSE(_tmp_status.IsOK());                                   \
+    EXPECT_THAT(_tmp_status.ErrorMessage(), ::testing::HasSubstr(msg)); \
   } while (false)

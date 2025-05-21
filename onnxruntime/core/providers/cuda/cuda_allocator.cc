@@ -3,17 +3,9 @@
 
 #include "cuda_allocator.h"
 #include "cuda_common.h"
-#include "core/framework/allocatormgr.h"
-#include "cuda_fence.h"
 #include "gpu_data_transfer.h"
 
 namespace onnxruntime {
-
-static const GPUDataTransfer* GetGPUDataTransfer(const SessionState* session_state) {
-  OrtDevice gpu_device(OrtDevice::GPU, OrtDevice::MemType::DEFAULT, 0);
-  OrtDevice cpu_device;
-  return static_cast<const GPUDataTransfer*>(session_state->GetDataTransferMgr().GetDataTransfer(gpu_device, cpu_device));
-}
 
 void CUDAAllocator::CheckDevice(bool throw_when_fail) const {
 #ifndef NDEBUG
@@ -51,7 +43,7 @@ void* CUDAAllocator::Alloc(size_t size) {
   CheckDevice(true);
   void* p = nullptr;
   if (size > 0) {
-    //BFCArena was updated recently to handle the exception and adjust the request size
+    // BFCArena was updated recently to handle the exception and adjust the request size
     CUDA_CALL_THROW(cudaMalloc((void**)&p, size));
   }
   return p;
@@ -68,7 +60,7 @@ void* CUDAExternalAllocator::Alloc(size_t size) {
   if (size > 0) {
     p = alloc_(size);
 
-    // review(codemzs): ORT_ENFORCE does not seem appropiate.
+    // review(codemzs): ORT_ENFORCE does not seem appropriate.
     ORT_ENFORCE(p != nullptr);
   }
 
@@ -77,7 +69,7 @@ void* CUDAExternalAllocator::Alloc(size_t size) {
 
 void CUDAExternalAllocator::Free(void* p) {
   free_(p);
-  std::lock_guard<OrtMutex> lock(lock_);
+  std::lock_guard<std::mutex> lock(lock_);
   auto it = reserved_.find(p);
   if (it != reserved_.end()) {
     reserved_.erase(it);
@@ -88,14 +80,10 @@ void CUDAExternalAllocator::Free(void* p) {
 void* CUDAExternalAllocator::Reserve(size_t size) {
   void* p = Alloc(size);
   if (!p) return nullptr;
-  std::lock_guard<OrtMutex> lock(lock_);
+  std::lock_guard<std::mutex> lock(lock_);
   ORT_ENFORCE(reserved_.find(p) == reserved_.end());
   reserved_.insert(p);
   return p;
-}
-
-FencePtr CUDAAllocator::CreateFence(const SessionState* session_state) {
-  return std::make_shared<CUDAFence>(GetGPUDataTransfer(session_state));
 }
 
 void* CUDAPinnedAllocator::Alloc(size_t size) {
@@ -108,10 +96,6 @@ void* CUDAPinnedAllocator::Alloc(size_t size) {
 
 void CUDAPinnedAllocator::Free(void* p) {
   CUDA_CALL_THROW(cudaFreeHost(p));
-}
-
-FencePtr CUDAPinnedAllocator::CreateFence(const SessionState* session_state) {
-  return std::make_shared<CUDAFence>(GetGPUDataTransfer(session_state));
 }
 
 }  // namespace onnxruntime

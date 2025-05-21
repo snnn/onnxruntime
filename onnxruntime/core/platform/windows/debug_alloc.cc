@@ -12,7 +12,7 @@
 //
 #ifndef NDEBUG
 #ifdef ONNXRUNTIME_ENABLE_MEMLEAK_CHECK
-constexpr int c_callstack_limit = 16;  // Maximum depth of callstack in leak trace
+constexpr int c_callstack_limit = 32;  // Maximum depth of callstack in leak trace
 #define VALIDATE_HEAP_EVERY_ALLOC 0    // Call HeapValidate on every new/delete
 
 #pragma warning(disable : 4073)  // initializers put in library initialization area (this is intentional)
@@ -55,40 +55,62 @@ struct MemoryBlock {
 };
 
 struct SymbolHelper {
-  SymbolHelper() noexcept {
-    SymSetOptions(SymGetOptions() | SYMOPT_DEFERRED_LOADS);
-    SymInitialize(GetCurrentProcess(), nullptr, true);
+  HANDLE process_handle_ = GetCurrentProcess();
+  bool initialized_ = false;
+
+  bool InitializeWhenNeeded() {
+    // We try only once
+    if (!initialized_) {
+      SymSetOptions(SymGetOptions() | SYMOPT_DEFERRED_LOADS);
+      // We use GetCurrentProcess() because other libs are likely to use it
+      if (!SymInitialize(process_handle_, nullptr, true)) {
+        const unsigned long long error{GetLastError()};
+        std::cerr << "SymInitialize() failed: " << error << std::endl;
+        return false;
+      }
+      initialized_ = true;
+    }
+    return true;
   }
 
-  void Lookup(std::string& string, const ULONG_PTR address) {
-    char buffer[2048] = {0};
-    Symbol symbol;
-    if (SymFromAddr(GetCurrentProcess(), address, 0, &symbol) == false) {
-      _snprintf_s(buffer, _TRUNCATE, "0x%08IX (Unknown symbol)", address);
-      string.append(buffer);
+  SymbolHelper() = default;
+
+  bool LookupSymAndInitialize(const void* address, SYMBOL_INFO* symbol, std::ostream& message) {
+    if (SymFromAddr(process_handle_, reinterpret_cast<ULONG_PTR>(address), 0, symbol) != TRUE) {
+      if (GetLastError() == ERROR_INVALID_HANDLE) {
+        // Try to initialize first
+        if (!InitializeWhenNeeded() ||
+            SymFromAddr(process_handle_, reinterpret_cast<ULONG_PTR>(address), 0, symbol) != TRUE) {
+          message << "0x" << address << " (Unknown symbol)";
+          return false;
+        }
+      } else {
+        message << "0x" << address << " (Unknown symbol)";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void Lookup(const void* address, std::ostream& message) {
+    SYMBOL_INFO_PACKAGE symbol_info_package{};
+    SYMBOL_INFO* symbol = &symbol_info_package.si;
+    symbol->SizeOfStruct = sizeof(SYMBOL_INFO);
+    symbol->MaxNameLen = std::size(symbol_info_package.name);
+
+    if (!LookupSymAndInitialize(address, symbol, message)) {
       return;
     }
 
     Line line;
     DWORD displacement;
-    if (SymGetLineFromAddr(GetCurrentProcess(), address, &displacement, &line) == false) {
-      _snprintf_s(buffer, _TRUNCATE, "(unknown file & line number): %s", symbol.Name);
-      string.append(buffer);
+    if (SymGetLineFromAddr(process_handle_, reinterpret_cast<ULONG_PTR>(address), &displacement, &line) == false) {
+      message << "(unknown file & line number): " << symbol->Name;
       return;
     }
 
-    _snprintf_s(buffer, _TRUNCATE, "%s(%d): %s", line.FileName, static_cast<int>(line.LineNumber), symbol.Name);
-    string.append(buffer);
+    message << line.FileName << "(" << line.LineNumber << "): " << symbol->Name;
   }
-
-  struct Symbol : SYMBOL_INFO {
-    Symbol() noexcept {
-      SizeOfStruct = sizeof(SYMBOL_INFO);
-      MaxNameLen = _countof(buffer);
-    }
-
-    char buffer[1024] = {0};
-  };
 
   struct Line : IMAGEHLP_LINE {
     Line() noexcept {
@@ -170,6 +192,13 @@ Memory_LeakCheck::Memory_LeakCheck() noexcept {
   g_heap = HeapCreate(0, 0, 0);
 }
 
+// print message to debug output and stdout
+// no trailing newline will be added
+static void DebugPrint(const char* message) {
+  OutputDebugStringA(message);
+  std::cout << "memleakdbg: " << message;
+}
+
 Memory_LeakCheck::~Memory_LeakCheck() {
   SymbolHelper symbols;
 
@@ -188,15 +217,16 @@ Memory_LeakCheck::~Memory_LeakCheck() {
     const MemoryBlock& block = *static_cast<const MemoryBlock*>(entry.lpData);
     const BYTE* pBlock = static_cast<const BYTE*>(entry.lpData) + sizeof(MemoryBlock);
 
-    std::string string;
-    char buffer[1024];
-    _snprintf_s(buffer, _TRUNCATE, "%IX bytes at location 0x%08IX\n", entry.cbData - sizeof(MemoryBlock), UINT_PTR(pBlock));
-    string.append(buffer);
+    std::ostringstream message;
+    message << (entry.cbData - sizeof(MemoryBlock)) << " bytes at location 0x" << static_cast<const void*>(pBlock)
+            << "\n";
     for (auto& p : block.m_pTraces) {
       if (!p) break;
-      symbols.Lookup(string, reinterpret_cast<ULONG_PTR>(p));
-      string.push_back('\n');
+      symbols.Lookup(p, message);
+      message << "\n";
     }
+
+    const std::string string = message.str();
 
     // Google test has memory leaks that they haven't fixed. One such issue is tracked here: https://github.com/google/googletest/issues/692
     //
@@ -215,34 +245,36 @@ Memory_LeakCheck::~Memory_LeakCheck() {
     //     empty_group_names = new std::map<int, string>; });
     if (string.find("RtlRunOnceExecuteOnce") == std::string::npos &&
         string.find("re2::RE2::Init") == std::string::npos &&
+        string.find("dynamic initializer for 'FLAGS_") == std::string::npos &&
+        string.find("AbslFlagDefaultGenForgtest_") == std::string::npos &&
+        string.find("AbslFlagDefaultGenForundefok::Gen") == std::string::npos &&
+        string.find("::SetProgramUsageMessage") == std::string::npos &&
+        string.find("testing::internal::ParseGoogleTestFlagsOnly") == std::string::npos &&
         string.find("testing::internal::Mutex::ThreadSafeLazyInit") == std::string::npos &&
         string.find("testing::internal::ThreadLocalRegistryImpl::GetThreadLocalsMapLocked") == std::string::npos &&
-        string.find("testing::internal::ThreadLocalRegistryImpl::GetValueOnCurrentThread") == std::string::npos) {
+        string.find("testing::internal::ThreadLocalRegistryImpl::GetValueOnCurrentThread") == std::string::npos &&
+        string.find("PyInit_onnxruntime_pybind11_state") == std::string::npos) {
       if (leaked_bytes == 0)
-        OutputDebugStringA("\n-----Starting Heap Trace-----\n\n");
+        DebugPrint("\n-----Starting Heap Trace-----\n\n");
 
       leak_count++;
       leaked_bytes += entry.cbData - sizeof(MemoryBlock);
-      OutputDebugStringA(string.c_str());
-      OutputDebugStringA("\n");
+      DebugPrint(string.c_str());
+      DebugPrint("\n");
     }
   }
 
   if (leaked_bytes) {
-    OutputDebugStringA("-----Ending Heap Trace-----\n\n");
+    DebugPrint("-----Ending Heap Trace-----\n\n");
 
-    std::string string;
-    char buffer[1024];
-    _snprintf_s(buffer, _TRUNCATE, "%d bytes of memory leaked in %d allocations", static_cast<int>(leaked_bytes), static_cast<int>(leak_count));
-    string.append(buffer);
-
-    std::cout << "\n----- MEMORY LEAKS: " << string.c_str() << "\n";
+    std::cout << "\n----- MEMORY LEAKS: " << leaked_bytes << " bytes of memory leaked in "
+              << leak_count << " allocations\n";
     if (!IsDebuggerPresent()) {
       exit(-1);
     }
 
   } else {
-    OutputDebugStringA("\n----- No memory leaks detected -----\n\n");
+    DebugPrint("\n----- No memory leaks detected -----\n\n");
   }
 
   HeapDestroy(heap);

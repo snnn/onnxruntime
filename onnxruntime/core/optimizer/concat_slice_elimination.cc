@@ -33,7 +33,10 @@ Status ConcatSliceElimination::ApplyImpl(Graph& graph, bool& modified, int graph
       modified = true;
     }
   }
-  LOGS(logger, INFO) << "Total fused concat node count: " << fused_count;
+
+  if (fused_count > 0) {
+    LOGS(logger, INFO) << "Total fused concat node count: " << fused_count;
+  }
 
   return Status::OK();
 }
@@ -41,10 +44,10 @@ Status ConcatSliceElimination::ApplyImpl(Graph& graph, bool& modified, int graph
 static bool GetSliceInfo(const Graph& graph,
                          const Node& node,
                          const logging::Logger& logger,
-                         std::vector<int64_t>& starts,
-                         std::vector<int64_t>& ends,
-                         std::vector<int64_t>& axes,
-                         std::vector<int64_t>& steps) {
+                         InlinedVector<int64_t>& starts,
+                         InlinedVector<int64_t>& ends,
+                         InlinedVector<int64_t>& axes,
+                         InlinedVector<int64_t>& steps) {
   if (!graph_utils::IsSupportedOptypeVersionAndDomain(node, "Slice", {1, 10, 11, 13})) {
     return false;
   }
@@ -82,14 +85,14 @@ static bool GetSliceInfo(const Graph& graph,
     };
 
     auto get_initializer_data =
-        [&graph](const ONNX_NAMESPACE::TensorProto* initializer) -> std::vector<int64_t> {
+        [&graph](const ONNX_NAMESPACE::TensorProto* initializer) -> InlinedVector<int64_t> {
       Initializer init(*initializer, graph.ModelPath());
       if (initializer->data_type() == ONNX_NAMESPACE::TensorProto::INT32) {
         int32_t* init_data = init.data<int32_t>();
-        return std::vector<int64_t>(init_data, init_data + init.size());
+        return InlinedVector<int64_t>(init_data, init_data + init.size());
       } else if (initializer->data_type() == ONNX_NAMESPACE::TensorProto::INT64) {
         int64_t* init_data = init.data<int64_t>();
-        return std::vector<int64_t>(init_data, init_data + init.size());
+        return InlinedVector<int64_t>(init_data, init_data + init.size());
       }
       return {};
     };
@@ -143,19 +146,19 @@ static bool GetSliceInfo(const Graph& graph,
 
 /**
 Apply Concat Slice Elimination transform. This transform removes the redundant
-Concat + Slice pattern if the concat and slice axis is 0 and we are slicing the same 
+Concat + Slice pattern if the concat and slice axis is 0 and we are slicing the same
 sizes as the inputs to concat.
 
 Before transform:
-ip_0(l0)               -- >Slice [0, l0] ---> op0  
-      \               | 
+ip_0(l0)               -- >Slice [0, l0] ---> op0
+      \               |
 ip_1(l1)-- Concat(axis=0) -->Slice [q, l0+l1]---> op1
-      /               | 
+      /               |
 ip_2(l2)                -->Slice [l0+l1, :]---> op2
 
 After transform:
-ip_0 ---> op0  
-      
+ip_0 ---> op0
+
 ip_1 ---> op1
 
 ip_2 ---> op2
@@ -163,8 +166,8 @@ ip_2 ---> op2
 */
 bool ConcatSliceElimination::FuseConcatSliceSubgraph(Node& concat, Graph& graph, const logging::Logger& logger) {
   // The root could be either a graph input or a node so use node arg to compare.
-  std::vector<NodeArg*>& concat_inputs = concat.MutableInputDefs();
-  std::vector<onnxruntime::Node*> concat_outputs = graph.GetMutableConsumerNodes(concat.MutableOutputDefs()[0]->Name());
+  auto& concat_inputs = concat.MutableInputDefs();
+  auto concat_outputs = graph.GetMutableConsumerNodes(concat.MutableOutputDefs()[0]->Name());
 
   // number of inputs and outputs must be equal
   if (concat_outputs.size() != concat_inputs.size()) return false;
@@ -197,7 +200,7 @@ bool ConcatSliceElimination::FuseConcatSliceSubgraph(Node& concat, Graph& graph,
     return size;
   };
 
-  std::vector<int64_t> concat_input_len(num_inputs);
+  InlinedVector<int64_t> concat_input_len(num_inputs);
   for (size_t i = 0; i < num_inputs; i++) {
     concat_input_len[i] = get_initializer_size(concat_inputs[i]->Name());
     if (concat_input_len[i] == -1) {  // invalid size
@@ -205,13 +208,16 @@ bool ConcatSliceElimination::FuseConcatSliceSubgraph(Node& concat, Graph& graph,
     }
   }
 
-  std::vector<int64_t> cumulative_input_len(num_inputs + 1, 0);
+  InlinedVector<int64_t> cumulative_input_len(num_inputs + 1, 0);
   std::partial_sum(concat_input_len.begin(), concat_input_len.end(), cumulative_input_len.begin() + 1);
-  std::vector<bool> visited(num_inputs, false);
+  InlinedVector<bool> visited(num_inputs, false);
 
-  std::vector<onnxruntime::Node*> ordered_slice = concat_outputs;
+  InlinedVector<onnxruntime::Node*> ordered_slice;
+  ordered_slice.reserve(concat_outputs.size());
+  ordered_slice.assign(concat_outputs.begin(), concat_outputs.end());
+
   for (auto slice : concat_outputs) {
-    std::vector<int64_t> starts, ends, axes, steps;
+    InlinedVector<int64_t> starts, ends, axes, steps;
     if (!GetSliceInfo(graph, *slice, logger, starts, ends, axes, steps)) return false;
     if (starts.size() > 1) return false;
     if (axes[0] != 0) return false;
@@ -245,7 +251,7 @@ bool ConcatSliceElimination::FuseConcatSliceSubgraph(Node& concat, Graph& graph,
   if (replace_cnt == 3) {
     LOGS(logger, INFO) << "Fused concat node: " << concat.OutputDefs()[0]->Name();
 
-    //delete the slice nodes and concat node
+    // delete the slice nodes and concat node
     graph_utils::RemoveNodeOutputEdges(graph, concat);
     graph.RemoveNode(concat.Index());
     for (auto slice_node : ordered_slice) {

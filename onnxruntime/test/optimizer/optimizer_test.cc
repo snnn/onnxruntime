@@ -24,10 +24,10 @@ using namespace ONNX_NAMESPACE;
 namespace onnxruntime {
 namespace test {
 
-static const std::string MODEL_FOLDER = "testdata/transform/";
-
 TEST(OptimizerTest, Basic) {
-  Model model("OptimizerBasic", false, ModelMetaData(), PathString(), IOnnxRuntimeOpSchemaRegistryList(), {{kOnnxDomain, 12}}, {}, DefaultLoggingManager().DefaultLogger());
+  Model model("OptimizerBasic", false, ModelMetaData(), PathString(), IOnnxRuntimeOpSchemaRegistryList(),
+              {{kOnnxDomain, 12}}, {}, DefaultLoggingManager().DefaultLogger());
+  const logging::Logger& logger = DefaultLoggingManager().DefaultLogger();
   auto& graph = model.MainGraph();
 
   constexpr int tensor_dim = 10;
@@ -65,34 +65,40 @@ TEST(OptimizerTest, Basic) {
     nodes.push_back(&node);
   }
 
-  std::unique_ptr<CPUExecutionProvider> cpu_execution_provider =
-      std::make_unique<CPUExecutionProvider>(CPUExecutionProviderInfo());
+  auto cpu_execution_provider = std::make_unique<CPUExecutionProvider>(CPUExecutionProviderInfo());
 #if !defined(DISABLE_SPARSE_TENSORS)
-  OptimizerExecutionFrame::Info info(nodes, initialized_tensor_set,
-                                     graph.ModelPath(),
-                                     *cpu_execution_provider.get(),
-                                     [&graph](const std::string& name) -> bool {
-                                       return graph.IsSparseInitializer(name);
-                                     });
+  OptimizerExecutionFrame::Info info(
+      nodes, initialized_tensor_set, graph.ModelPath(), *cpu_execution_provider.get(),
+      [&graph](const std::string& name) -> bool {
+        return graph.IsSparseInitializer(name);
+      },
+      logger);
 #else
-  OptimizerExecutionFrame::Info info(nodes, initialized_tensor_set,
-                                     graph.ModelPath(),
-                                     *cpu_execution_provider.get(),
-                                     [](std::string const& ) { return false; });
-#endif  //!defined(DISABLE_SPARSE_TENSORS)
+  OptimizerExecutionFrame::Info info(
+      nodes, initialized_tensor_set, graph.ModelPath(), *cpu_execution_provider.get(),
+      [](std::string const&) { return false; },
+      logger);
+#endif  //! defined(DISABLE_SPARSE_TENSORS)
 
   std::vector<int> fetch_mlvalue_idxs{info.GetMLValueIndex("out")};
   OptimizerExecutionFrame frame(info, fetch_mlvalue_idxs);
-  const logging::Logger& logger = DefaultLoggingManager().DefaultLogger();
+
+  const ConfigOptions empty_config_options;
 
   for (auto& node : graph.Nodes()) {
-    auto kernel = info.CreateKernel(&node);
+    auto kernel = info.CreateKernel(&node, empty_config_options);
 
     // kernel can only be a nullptr if a CPU kernel implementation has been removed,
     // if that is the case, OpKernelContext instance construction will throw in the next step
     // and fail the test
-
-    OpKernelContext op_kernel_context(&frame, kernel.get(), nullptr, logger);
+#ifdef _WIN32
+#pragma warning(push)
+#pragma warning(disable : 6387)
+#endif
+    OpKernelContext op_kernel_context(&frame, kernel.get(), nullptr, nullptr, logger);
+#ifdef _WIN32
+#pragma warning(pop)
+#endif
 
     auto st = kernel->Compute(&op_kernel_context);
     ASSERT_TRUE(st.IsOK()) << st.ErrorMessage();
@@ -100,7 +106,7 @@ TEST(OptimizerTest, Basic) {
     std::vector<OrtValue> fetches;
     ASSERT_STATUS_OK(frame.GetOutputs(fetches));
     auto& tensor = fetches[0].Get<Tensor>();
-    const std::vector<int32_t> found(tensor.template Data<int32_t>(), tensor.template Data<int32_t>() + tensor_dim);
+    const std::vector<int32_t> found(tensor.Data<int32_t>(), tensor.Data<int32_t>() + tensor_dim);
     std::vector<int32_t> expected;
     for (int j = 0; j < tensor_dim; j++) {
       expected.push_back(3 * j);

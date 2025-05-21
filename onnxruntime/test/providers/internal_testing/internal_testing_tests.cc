@@ -4,8 +4,12 @@
 #if !defined(REDUCED_OPS_BUILD)  // may not work with excluded op kernel implementations
 
 #include "core/common/logging/logging.h"
+#include "core/common/span_utils.h"
 #include "core/framework/utils.h"
 #include "core/session/inference_session.h"
+#include "core/session/onnxruntime_cxx_api.h"
+#include "core/session/onnxruntime_session_options_config_keys.h"
+#include "core/session/ort_env.h"
 
 #include "test/framework/test_utils.h"
 #include "test/test_environment.h"
@@ -20,14 +24,20 @@
 using namespace ONNX_NAMESPACE;
 using namespace onnxruntime::logging;
 
-namespace onnxruntime {
+// defined in test_main.cc
+extern std::unique_ptr<Ort::Env> ort_env;
 
+namespace onnxruntime {
 namespace test {
 
-static void CreateSession(const SessionOptions& so, std::unique_ptr<InferenceSessionWrapper>& session,
-                          const ORTCHAR_T* model_path = ORT_TSTR("testdata/mnist.onnx"),  // arbitrary test model
-                          bool enable_custom_ep = true,
-                          const std::unordered_set<std::string>* override_supported_ops = nullptr) {
+using namespace onnxruntime::internal_testing_ep;
+
+#define ORT_MODEL_FOLDER ORT_TSTR("testdata/")
+
+static Status CreateSession(const SessionOptions& so, std::unique_ptr<InferenceSessionWrapper>& session,
+                            const ORTCHAR_T* model_path = ORT_MODEL_FOLDER "mnist.onnx",  // arbitrary test model
+                            bool enable_custom_ep = true,
+                            const std::unordered_set<std::string>* override_supported_ops = nullptr) {
   session = std::make_unique<InferenceSessionWrapper>(so, GetEnvironment());
 
   // set supported ops to ops that are ideally found consecutively in the model.
@@ -39,12 +49,13 @@ static void CreateSession(const SessionOptions& so, std::unique_ptr<InferenceSes
                                                                                 : &default_supported_ops;
 
   if (enable_custom_ep) {
-    ASSERT_STATUS_OK(session->RegisterExecutionProvider(
+    ORT_RETURN_IF_ERROR(session->RegisterExecutionProvider(
         std::make_unique<InternalTestingExecutionProvider>(*supported_ops)));
   }
 
-  ASSERT_STATUS_OK(session->Load(model_path));
-  ASSERT_STATUS_OK(session->Initialize());
+  ORT_RETURN_IF_ERROR(session->Load(model_path));
+  ORT_RETURN_IF_ERROR(session->Initialize());
+  return Status::OK();
 }
 
 static void ExecuteMnist(InferenceSessionWrapper& session, bool custom_ep_enabled) {
@@ -79,14 +90,13 @@ static void ExecuteMnist(InferenceSessionWrapper& session, bool custom_ep_enable
     const auto& initializer = session_state.GetConstantInitializedTensors().at(idx);
     const auto expected = initializer.Get<Tensor>().DataAsSpan<float>();
 
-    ASSERT_THAT(data, ::testing::ContainerEq(expected));
+    ASSERT_TRUE(SpanEq(data, expected));
   }
 }
 
-#if !defined(DISABLE_SPARSE_TENSORS)
 #if !defined(ORT_MINIMAL_BUILD)
 TEST(InternalTestingEP, TestSaveAndLoadOrtModel) {
-  const ORTCHAR_T* ort_model_path = ORT_TSTR("testdata/mnist.internal_testing_ep.test_output.ort");
+  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "mnist.internal_testing_ep.test_output.ort";
 
   //
   // First load the onnx format model and save as an ORT model.
@@ -96,20 +106,20 @@ TEST(InternalTestingEP, TestSaveAndLoadOrtModel) {
   SessionOptions so;
   so.optimized_model_filepath = ort_model_path;
 
-  CreateSession(so, session);
+  ASSERT_STATUS_OK(CreateSession(so, session));
   // this graph should include the original nodes that the custom EP will take at runtime
   auto num_nodes = session->GetGraph().NumberOfNodes();
 
   //
   // Second, load the ORT format model with just the CPU EP to make sure it can be executed. This tests that the
-  // fallback to the CPU EP kernel hashes works.
+  // fallback to the CPU EP works.
   //
   std::unique_ptr<InferenceSessionWrapper> session2;
 
   so.optimized_model_filepath.clear();
   bool enable_custom_ep = false;
 
-  CreateSession(so, session2, ort_model_path, enable_custom_ep);
+  ASSERT_STATUS_OK(CreateSession(so, session2, ort_model_path, enable_custom_ep));
   const auto& graph1 = session2->GetGraph();
   // model should have all the original nodes and we should be able to execute with the fallback to CPU EP
   ASSERT_EQ(graph1.NumberOfNodes(), num_nodes);
@@ -121,7 +131,7 @@ TEST(InternalTestingEP, TestSaveAndLoadOrtModel) {
   // for the ORT format model.
   //
   enable_custom_ep = true;
-  CreateSession(so, session2, ort_model_path, enable_custom_ep);
+  ASSERT_STATUS_OK(CreateSession(so, session2, ort_model_path, enable_custom_ep));
   const auto& graph2 = session2->GetGraph();
   // model should be able to be loaded, and we should compile using custom ep. that will result in one node for the
   // custom EP (with Conv/Add/Relu/MaxPool), one for a reshape, and one for the fused MatMul+Add.
@@ -130,7 +140,7 @@ TEST(InternalTestingEP, TestSaveAndLoadOrtModel) {
 }
 
 TEST(InternalTestingEP, PreventSaveOfModelWithCompiledOps) {
-  const ORTCHAR_T* ort_model_path = ORT_TSTR("testdata/mnist.internal_testing_ep.ort");
+  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "mnist.internal_testing_ep.ort";
 
   // make sure we can't save a model with compiled ops. input/output model format doesn't matter
   SessionOptions so;
@@ -143,34 +153,164 @@ TEST(InternalTestingEP, PreventSaveOfModelWithCompiledOps) {
       std::make_unique<InternalTestingExecutionProvider>(supported_ops)));
 
   ASSERT_STATUS_OK(session->Load(ort_model_path));
-  auto status = session->Initialize();
-  ASSERT_FALSE(status.IsOK()) << "Initialize should have failed when trying to save model with compiled kernels";
-  ASSERT_THAT(status.ErrorMessage(), ::testing::HasSubstr("Unable to serialize model as it contains compiled nodes"));
+  ASSERT_STATUS_NOT_OK_AND_HAS_SUBSTR(session->Initialize(),
+                                      "Unable to serialize model as it contains compiled nodes");
 }
+
+// the internal NHWC operators are only included as part of contrib ops currently. as the EP requests the NHWC
+// version of the ONNX operator when matching a static kernel, those are required.
+#if !defined(DISABLE_CONTRIB_OPS) && !defined(USE_ROCM)
+TEST(InternalTestingEP, TestMixOfStaticAndCompiledKernels) {
+  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "transform/fusion/conv_relu_opset12.onnx";
+
+  SessionOptions so;
+  InferenceSessionWrapper session(so, GetEnvironment());
+
+  const std::unordered_set<std::string> supported_ops{"Conv", "Add", "Relu", "MaxPool"};
+  auto ep = std::make_unique<InternalTestingExecutionProvider>(supported_ops,
+                                                               std::unordered_set<std::string>{},
+                                                               DataLayout::NHWC);
+  ep->EnableStaticKernels();
+  ASSERT_STATUS_OK(session.RegisterExecutionProvider(std::move(ep)));
+
+  ASSERT_STATUS_OK(session.Load(ort_model_path));
+  ASSERT_STATUS_OK(session.Initialize());
+
+  TensorShape input_shape_x{1, 1, 7, 7};
+  TensorShape input_shape_w{1, 1, 1, 1};
+  std::vector<float> input_x(input_shape_x.Size(), 1.f);
+  std::vector<float> input_w(input_shape_w.Size(), 1.f);
+  OrtValue ml_value_x;
+  OrtValue ml_value_w;
+  CreateMLValue<float>(input_shape_x.GetDims(), input_x.data(), OrtMemoryInfo(), &ml_value_x);
+  CreateMLValue<float>(input_shape_w.GetDims(), input_w.data(), OrtMemoryInfo(), &ml_value_w);
+
+  NameMLValMap feeds;
+  feeds.insert(std::make_pair("X", ml_value_x));
+  feeds.insert(std::make_pair("W", ml_value_w));
+
+  // prepare outputs
+  std::vector<std::string> output_names;
+  output_names.push_back("Z");
+  std::vector<OrtValue> fetches;
+
+  // Error message should come from the Conv implementation with the statically registered kernel
+  ASSERT_STATUS_NOT_OK_AND_HAS_SUBSTR(session.Run(feeds, output_names, &fetches),
+                                      "Non-zero status code returned while running Conv node. Name:'_token_2' "
+                                      "Status Message: TODO: add NHWC implementation here.");
+}
+
+TEST(InternalTestingEP, TestNhwcConversionOfStaticKernels) {
+  auto run_test = [&](const ORTCHAR_T* model_path) {
+    SCOPED_TRACE("model path: " + ToUTF8String(model_path));
+
+    SessionOptions so;
+    // set this if you want to manually inspect the optimized model
+    // so.optimized_model_filepath = ORT_MODEL_FOLDER "squeezenet/model.test_output.onnx";
+    InferenceSessionWrapper session(so, GetEnvironment());
+
+    const std::unordered_set<std::string> supported_ops{"Conv", "Clip"};
+    auto ep = std::make_unique<InternalTestingExecutionProvider>(supported_ops,
+                                                                 std::unordered_set<std::string>{},
+                                                                 DataLayout::NHWC);
+    ep->EnableStaticKernels();
+    ASSERT_STATUS_OK(session.RegisterExecutionProvider(std::move(ep)));
+
+    ASSERT_STATUS_OK(session.Load(model_path));
+    ASSERT_STATUS_OK(session.Initialize());
+
+    const auto& graph = session.GetGraph();
+
+    // all Conv nodes should have been converted to NHWC versions and
+    for (const auto& node : graph.Nodes()) {
+      if (node.OpType() == "Conv") {
+        ASSERT_EQ(node.Domain(), kMSInternalNHWCDomain);
+      }
+    }
+
+    TensorShape input_shape_x{1, 3, 224, 224};
+    std::vector<float> input_x(input_shape_x.Size(), 1.f);
+    OrtValue ml_value_x;
+    CreateMLValue<float>(input_shape_x.GetDims(), input_x.data(), OrtMemoryInfo(), &ml_value_x);
+
+    NameMLValMap feeds;
+    feeds.insert(std::make_pair("data_0", ml_value_x));
+
+    // prepare outputs
+    std::vector<std::string> output_names;
+    output_names.push_back("softmaxout_1");
+    std::vector<OrtValue> fetches;
+
+    ASSERT_STATUS_NOT_OK_AND_HAS_SUBSTR(session.Run(feeds, output_names, &fetches),
+                                        "Non-zero status code returned while running Conv node. Name:'_token_2' "
+                                        "Status Message: TODO: add NHWC implementation here.");
+  };
+
+  // the internal NHWC domain supports opset 11 and later
+  const ORTCHAR_T* onnx_model_path = ORT_MODEL_FOLDER "squeezenet/model_opset11.onnx";
+  run_test(onnx_model_path);
+
+  // Note: Using ORT format model with runtime optimizations so that the Conv nodes are preserved in the graph,
+  // not converted into FusedConv nodes. The InternalTestingExecutionProvider handles Conv nodes.
+  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "squeezenet/model_opset11.with_runtime_opt.ort";
+  run_test(ort_model_path);
+}
+
+// make sure allocators returned by SessionState::GetAllocator are valid when IExecutionProvider::ReplaceAllocator
+// is used. if something is off InferenceSession::Initialize will fail.
+TEST(InternalTestingEP, TestReplaceAllocatorDoesntBreakDueToLocalAllocatorStorage) {
+  OrtMemoryInfo mem_info("Replacement", OrtAllocatorType::OrtDeviceAllocator);
+  AllocatorPtr replacement_alloc = std::make_shared<CPUAllocator>(mem_info);
+  OrtEnv& env = *(OrtEnv*)(*ort_env);
+
+  ASSERT_STATUS_OK(env.RegisterAllocator(replacement_alloc));
+
+  SessionOptions so;
+  ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsConfigUseEnvAllocators, "1"));
+  InferenceSessionWrapper session(so, env.GetEnvironment());
+
+  const std::unordered_set<std::string> supported_ops{"Conv", "Clip"};
+
+  std::vector<std::shared_ptr<IExecutionProvider>> eps{
+      std::make_shared<InternalTestingExecutionProvider>(supported_ops, std::unordered_set<std::string>{},
+                                                         DataLayout::NHWC),
+      std::make_shared<CPUExecutionProvider>(CPUExecutionProviderInfo{})};
+
+  for (const auto& ep : eps) {
+    ASSERT_STATUS_OK(session.RegisterExecutionProvider(ep));
+  }
+
+  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "squeezenet/model.onnx";
+  ASSERT_STATUS_OK(session.Load(ort_model_path));
+  ASSERT_STATUS_OK(session.Initialize());
+
+  ASSERT_EQ(replacement_alloc, session.GetAllocator(OrtMemoryInfo())) << "Allocators registered from Env should have the highest priority";
+}
+
+#endif  // !defined(DISABLE_CONTRIB_OPS)
 #endif  // !defined(ORT_MINIMAL_BUILD)
-#endif  // !defined(DISABLE_SPARSE_TENSORS)
 
 // test to validate a minimal build
 TEST(InternalTestingEP, TestLoadOrtModel) {
-  const ORTCHAR_T* ort_model_path = ORT_TSTR("testdata/mnist.internal_testing_ep.ort");
+  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "mnist.internal_testing_ep.ort";
 
   std::unique_ptr<InferenceSessionWrapper> session;
   bool enable_custom_ep = true;
 
-  CreateSession(SessionOptions{}, session, ort_model_path, enable_custom_ep);
+  ASSERT_STATUS_OK(CreateSession(SessionOptions{}, session, ort_model_path, enable_custom_ep));
   ExecuteMnist(*session, enable_custom_ep);
 }
 
-// test that is the custom EP cannot take all nodes due to device limitations
+// test that if the custom EP cannot take all nodes due to device limitations
 // that we fallback to the CPU implementations and can execute the model
 TEST(InternalTestingEP, TestLoadOrtModelWithReducedOpCoverage) {
-  const ORTCHAR_T* ort_model_path = ORT_TSTR("testdata/mnist.internal_testing_ep.ort");
+  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "mnist.internal_testing_ep.ort";
   const std::unordered_set<std::string> supported_ops{"Conv", "Add", "Relu" /*, "MaxPool"*/};
 
   std::unique_ptr<InferenceSessionWrapper> session;
   bool enable_custom_ep = true;
 
-  CreateSession(SessionOptions{}, session, ort_model_path, enable_custom_ep, &supported_ops);
+  ASSERT_STATUS_OK(CreateSession(SessionOptions{}, session, ort_model_path, enable_custom_ep, &supported_ops));
 
   const auto& graph = session->GetGraph();
   // Conv+Add gets fused by level 1 optimizer into single node. The 'Conv'/'Add'/'Relu' nodes should be compiled and
@@ -181,7 +321,6 @@ TEST(InternalTestingEP, TestLoadOrtModelWithReducedOpCoverage) {
 
   // the generated op type should have a hash for the model based on the model path
   const std::string expected_op_type_prefix = "InternalTestingEP_9611636968429821767_";
-  int compiled_node_num = 0;
 
   for (const auto& node : graph.Nodes()) {
     EXPECT_EQ(supported_ops.count(node.OpType()), size_t(0))
@@ -189,7 +328,7 @@ TEST(InternalTestingEP, TestLoadOrtModelWithReducedOpCoverage) {
     if (node.GetExecutionProviderType() == utils::kInternalTestingExecutionProvider) {
       EXPECT_STATUS_OK(func_mgr.GetFuncs(node.Name(), compute_func));
       EXPECT_NE(compute_func, nullptr);
-      EXPECT_EQ(node.OpType(), expected_op_type_prefix + std::to_string(compiled_node_num++));
+      EXPECT_THAT(node.OpType(), ::testing::StartsWith(expected_op_type_prefix));
     }
   }
 
@@ -225,13 +364,13 @@ static int CountAndValidateAssignedNodes(const Graph& current_graph,
 // Test model that contains a subgraph. This model has a Loop and an If so multiple layers of nested subgraphs.
 // There are Add nodes in the Loop and If subgraphs so we should see the custom EP taking nodes at both these levels.
 TEST(InternalTestingEP, TestModelWithSubgraph) {
-  const ORTCHAR_T* ort_model_path = ORT_TSTR("testdata/ort_github_issue_4031.onnx.ort");
+  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "ort_github_issue_4031.onnx.ort";
   const std::unordered_set<std::string> supported_ops{"Add"};
 
   std::unique_ptr<InferenceSessionWrapper> session;
   bool enable_custom_ep = true;
 
-  CreateSession(SessionOptions{}, session, ort_model_path, enable_custom_ep, &supported_ops);
+  ASSERT_STATUS_OK(CreateSession(SessionOptions{}, session, ort_model_path, enable_custom_ep, &supported_ops));
 
   const auto& graph = session->GetGraph();
   auto& func_mgr = const_cast<SessionState&>(session->GetSessionState()).GetMutableFuncMgr();
@@ -247,7 +386,7 @@ TEST(InternalTestingEP, TestModelWithSubgraph) {
   // the output from fused nodes using the testing EP is always 0, so we should match the expected output this way
   // as we replace all the Add nodes with something that returns 0.
   // RunAndVerifyOutputsWithEP checks that nodes are assigned to the EP so we know it's being used to execute the model
-  CreateMLValue<float>(TestCPUExecutionProvider()->GetAllocator(0, OrtMemTypeDefault), {1}, {-2.f},
+  CreateMLValue<float>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], {1}, {-2.f},
                        &ml_value);
   NameMLValMap feeds;
   feeds.insert(std::make_pair("state_var_in", ml_value));
@@ -302,8 +441,11 @@ TEST(InternalTestingEP, TestOrtModelWithCompileFailure) {
   // In the test file, there are 2 Conv and 1 Gemm nodes, all disconnected
   // So we should have 3 partitions be taken by InternalTestingExecutionProvider/CompileFailureTestExecutionProvider
   // But CompileFailureTestExecutionProvider will fail the Compile for partition contains "Gemm" node
-  // This is to test the model initialization won't fail and Gemm node will not be replaced by the fused_node
-  const ORTCHAR_T* ort_model_path = ORT_TSTR("testdata/mnist.internal_testing_ep.ort");
+  // Post layout transformations we cannot revert back if compile fails because
+  // the layout transformation for this EP is already done at this stage and reverting
+  // can result in more failures.
+  // This is to test the model initialization fails if compile fails.
+  const ORTCHAR_T* ort_model_path = ORT_MODEL_FOLDER "mnist.internal_testing_ep.ort";
 
   const std::unordered_set<std::string>& supported_ops{"Conv", "Gemm"};
   const std::unordered_set<std::string>& compile_failure_ops{"Gemm"};
@@ -325,33 +467,12 @@ TEST(InternalTestingEP, TestOrtModelWithCompileFailure) {
   }
 
   // Use CompileFailureTestExecutionProvider which will fail Compile on "Gemm"
-  // We should have 2 partitions taken by the EP
-  // 2 Conv
   {
     InferenceSessionWrapper session(SessionOptions(), GetEnvironment());
     ASSERT_STATUS_OK(session.RegisterExecutionProvider(
         std::make_unique<CompileFailureTestExecutionProvider>(supported_ops, compile_failure_ops)));
     ASSERT_STATUS_OK(session.Load(ort_model_path));
-    ASSERT_STATUS_OK(session.Initialize());
-
-    // 2 Conv nodes shoule be replaced with fused nodes
-    const auto& graph = session.GetGraph();
-    int num_replaced_nodes = CountAndValidateAssignedNodes(
-        session.GetGraph(), {"Conv"}, const_cast<SessionState&>(session.GetSessionState()).GetMutableFuncMgr());
-
-    ASSERT_EQ(num_replaced_nodes, 2);
-
-    // The Gemm node should still not have been replaced
-    int count_compile_failure_nodes = 0;
-    for (const auto& node : graph.Nodes()) {
-      if (compile_failure_ops.find(node.OpType()) != compile_failure_ops.end())
-        count_compile_failure_nodes++;
-    }
-    ASSERT_EQ(count_compile_failure_nodes, 1);
-
-    // Execute the session, since the last node is Gemm, and its input 0 is all 0s
-    // So the result should be the bias initializer of the Gemm node
-    ExecuteMnist(session, true /* enable_custom_ep */);
+    ASSERT_STATUS_NOT_OK(session.Initialize());
   }
 }
 }  // namespace test

@@ -6,12 +6,12 @@ The API should be documented with comments in the [public header files](../inclu
 
 The [Jazzy](https://github.com/realm/jazzy) tool is used to generate documentation from the code.
 
-For example, to generate documentation for a release version, from the repo root, run:
+To generate documentation, from the repo root, run:
 
 ```bash
-jazzy --config objectivec/docs/jazzy_config.yaml --output <output directory> --module-version $(cat VERSION_NUMBER)
+jazzy --config objectivec/docs/jazzy_config.yaml --output <output directory>
 ```
 
 The generated documentation website files will be in `<output directory>`.
 
-[docs.readme.md](./docs.readme.md) contains content for the main page of the generated documentation website.
+[main_page.md](./main_page.md) contains content for the main page of the generated documentation website.

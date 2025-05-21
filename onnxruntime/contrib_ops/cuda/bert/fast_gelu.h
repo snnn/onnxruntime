@@ -16,9 +16,11 @@ class FastGelu final : public CudaKernel {
  public:
   FastGelu(const OpKernelInfo& op_kernel_info);
   Status ComputeInternal(OpKernelContext* ctx) const override;
-  
+
  private:
+#ifndef USE_ROCM
   bool use_half2_;
+#endif
 };
 
 }  // namespace cuda

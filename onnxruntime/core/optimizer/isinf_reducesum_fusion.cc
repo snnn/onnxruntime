@@ -22,7 +22,7 @@ IsAllFinite --> Not
 Status IsInfReduceSumFusion::ApplyImpl(Graph& graph, bool& modified, int graph_level, const logging::Logger& logger) const {
   GraphViewer graph_viewer(graph);
   const auto& node_topology_list = graph_viewer.GetNodesInTopologicalOrder();
-  std::vector<std::reference_wrapper<Node>> nodes_to_remove;
+  InlinedVector<std::reference_wrapper<Node>> nodes_to_remove;
   for (auto node_index : node_topology_list) {
     nodes_to_remove.clear();
     auto* node_ptr = graph.GetNode(node_index);
@@ -39,13 +39,13 @@ Status IsInfReduceSumFusion::ApplyImpl(Graph& graph, bool& modified, int graph_l
       continue;
     }
 
-    std::vector<NodeArg*> input_defs = isinf_node.MutableInputDefs();
+    auto input_defs = isinf_node.MutableInputDefs();
     // see if there is a Cast before IsInf
-    // This will happen if input type is FP16 but IsInf doesnt support fp16, so it will be cast to float/double
+    // This will happen if input type is FP16 but IsInf doesn't support fp16, so it will be cast to float/double
     // This Cast can be skipped as we are replacing the subgraph with IsAllFinite, which supports FP16
     auto cast1_node_iter = isinf_node.InputNodesBegin();
     if (cast1_node_iter != isinf_node.InputNodesEnd() &&
-        graph_utils::IsSupportedOptypeVersionAndDomain(*cast1_node_iter, "Cast", {9, 13}) &&
+        graph_utils::IsSupportedOptypeVersionAndDomain(*cast1_node_iter, "Cast", {9, 13, 19}) &&
         cast1_node_iter->GetOutputEdgesCount() == 1) {
       // check input type of cast node
       Node& cast1_node = *graph.GetNode(cast1_node_iter->Index());
@@ -65,7 +65,7 @@ Status IsInfReduceSumFusion::ApplyImpl(Graph& graph, bool& modified, int graph_l
     }
 
     Node& cast2_node = *graph.GetNode(cast2_node_itr->Index());
-    if (!graph_utils::IsSupportedOptypeVersionAndDomain(cast2_node, "Cast", {9, 13}) ||
+    if (!graph_utils::IsSupportedOptypeVersionAndDomain(cast2_node, "Cast", {9, 13, 19}) ||
         cast2_node.GetOutputEdgesCount() != 1 ||
         graph.NodeProducesGraphOutput(cast2_node)) {
       continue;

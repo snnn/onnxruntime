@@ -1,12 +1,13 @@
-include (ExternalProject)
+set(EIGEN_BUILD_DOC OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_BLAS OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_LAPACK OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_PKGCONFIG OFF CACHE BOOL "" FORCE)
+set(EIGEN_BUILD_CMAKE_PACKAGE ON CACHE BOOL "" FORCE)
 
-if (onnxruntime_USE_PREINSTALLED_EIGEN)
-    add_library(eigen INTERFACE)
-    file(TO_CMAKE_PATH ${eigen_SOURCE_PATH} eigen_INCLUDE_DIRS)
-    target_include_directories(eigen INTERFACE ${eigen_INCLUDE_DIRS})
-else ()
-    if (onnxruntime_USE_ACL)
-        execute_process(COMMAND  git apply --ignore-space-change --ignore-whitespace ${PROJECT_SOURCE_DIR}/patches/eigen/Fix_Eigen_Build_Break.patch WORKING_DIRECTORY ${PROJECT_SOURCE_DIR})
-    endif()
-    set(eigen_INCLUDE_DIRS  "${PROJECT_SOURCE_DIR}/external/eigen")
-endif()
+onnxruntime_fetchcontent_declare(
+    Eigen3
+    URL ${DEP_URL_eigen}
+    URL_HASH SHA1=${DEP_SHA1_eigen}
+    EXCLUDE_FROM_ALL
+)
+onnxruntime_fetchcontent_makeavailable(Eigen3)

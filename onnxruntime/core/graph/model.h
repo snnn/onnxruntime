@@ -7,18 +7,21 @@
 #include <memory>
 #include <climits>
 #include <string>
-#include "core/common/path.h"
-#include "core/graph/graph_viewer.h"
-#include "core/session/onnxruntime_c_api.h"
-#include "gsl/gsl"
+#include <filesystem>
 
-namespace flatbuffers {
-class FlatBufferBuilder;
-template <typename T>
-struct Offset;
-}  // namespace flatbuffers
+#include "core/common/flatbuffers.h"
+
+#include "core/framework/session_options.h"
+#include "core/graph/graph_viewer.h"
+#include "core/graph/ort_format_load_options.h"
+#include "core/session/onnxruntime_c_api.h"
+#if !defined(ORT_MINIMAL_BUILD)
+#include "core/graph/function_template.h"
+#endif
 
 namespace onnxruntime {
+
+class PrepackedShareableWeightsContainer;
 
 namespace fbs {
 struct Model;
@@ -26,6 +29,30 @@ struct Model;
 
 typedef std::unordered_map<std::string, std::string> ModelMetaData;
 using IOnnxRuntimeOpSchemaRegistryList = std::list<std::shared_ptr<IOnnxRuntimeOpSchemaCollection>>;
+
+// Options to configure Model.
+struct ModelOptions {
+  bool allow_released_opsets_only;
+  // If true, all inconsistencies encountered during shape and type inference
+  // will be exposed to the caller as failures. If false, in some cases
+  // warnings will be logged but processing will continue and no error will
+  // be returned.
+  bool strict_shape_type_inference;
+
+  CheckLoadCancellationFn check_load_cancellation_fn;
+
+  ModelOptions(bool allow_released_opsets_only, bool strict_shape_type_inference,
+               CheckLoadCancellationFn check_load_cancellation_fn)
+      : allow_released_opsets_only(allow_released_opsets_only),
+        strict_shape_type_inference(strict_shape_type_inference),
+        check_load_cancellation_fn(std::move(check_load_cancellation_fn)) {}
+
+  ModelOptions(bool allow_released_opsets_only, bool strict_shape_type_inference)
+      : allow_released_opsets_only(allow_released_opsets_only),
+        strict_shape_type_inference(strict_shape_type_inference) {}
+
+  ModelOptions() : ModelOptions(true, false) {}
+};
 
 // A machine learning model representation class.
 // Besides a main <Graph>, it also holds basic information, say,
@@ -38,9 +65,9 @@ class Model {
   explicit Model(const std::string& graph_name,
                  bool is_onnx_domain_only,
                  const logging::Logger& logger,
-                 bool allow_released_opsets_only = true)
+                 const ModelOptions& options = {})
       : Model(graph_name, is_onnx_domain_only, ModelMetaData(), PathString(), IOnnxRuntimeOpSchemaRegistryList(), {},
-              {}, logger, allow_released_opsets_only) {}
+              {}, logger, options) {}
 
   // Construct model from scratch.
   explicit Model(const std::string& graph_name,
@@ -51,37 +78,43 @@ class Model {
                  const std::unordered_map<std::string, int>& domain_to_version,
                  const std::vector<ONNX_NAMESPACE::FunctionProto>& model_local_functions,
                  const logging::Logger& logger,
-                 bool allow_released_opsets_only = true);
+                 const ModelOptions& options = {});
 
   // NOTE: after calling this constructor, <*this> model will
   // hold a copy of <model_proto>.
   explicit Model(const ONNX_NAMESPACE::ModelProto& model_proto,
                  const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                 const logging::Logger& logger, bool allow_released_opsets_only = true)
-      : Model(model_proto, PathString(), local_registries, logger, allow_released_opsets_only) {}
+                 const logging::Logger& logger, const ModelOptions& options = {})
+      : Model(model_proto, PathString(), local_registries, logger, options) {}
 
   // NOTE: after calling this constructor, <*this> model will
   // hold a copy of <model_proto>.
   explicit Model(const ONNX_NAMESPACE::ModelProto& model_proto,
                  const PathString& model_path,
                  const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                 const logging::Logger& logger, bool allow_released_opsets_only = true);
+                 const logging::Logger& logger, const ModelOptions& options = {});
 
   // NOTE: after calling this constructor, <*this> model will
   // own the <model_proto>.
   explicit Model(ONNX_NAMESPACE::ModelProto&& model_proto,
                  const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                 const logging::Logger& logger, bool allow_released_opsets_only = true)
-      : Model(std::move(model_proto), PathString(), local_registries, logger, allow_released_opsets_only) {}
+                 const logging::Logger& logger, const ModelOptions& options = {})
+      : Model(std::move(model_proto), PathString(), local_registries, logger, options) {}
 
   // NOTE: after calling this constructor, <*this> model will
   // own the <model_proto>.
   explicit Model(ONNX_NAMESPACE::ModelProto&& model_proto,
                  const PathString& model_path,
                  const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                 const logging::Logger& logger, bool allow_released_opsets_only = true);
+                 const logging::Logger& logger,
+                 const ModelOptions& options = {});
 
 #endif  // !defined(ORT_MINIMAL_BUILD)
+
+  // Check for load cancellation.
+  bool IsLoadCancellationFlagSet() const noexcept {
+    return check_load_cancellation_fn_ && check_load_cancellation_fn_();
+  }
 
 #if !defined(ORT_MINIMAL_BUILD)
   // Get model's IR version.
@@ -122,6 +155,8 @@ class Model {
   // Returns empty string if not specified.
   const std::string GraphDocString() const;
 
+  const NodeHashMap<std::string, std::unique_ptr<FunctionTemplate>>& GetModelLocalFunctionTemplates() const;
+
 #else
   // Get model's IR version.
   // Return <kNoVersion> if not specified.
@@ -155,7 +190,7 @@ class Model {
   const ModelMetaData& MetaData() const noexcept;
 
   // Gets the path from which the model was loaded, if any.
-  const Path& ModelPath() const noexcept { return model_path_; }
+  const std::filesystem::path& ModelPath() const noexcept { return model_path_; }
 
   // Get model's main graph.
   Graph& MainGraph() noexcept;
@@ -163,40 +198,32 @@ class Model {
 
 #if !defined(ORT_MINIMAL_BUILD)
   // Get model's serialization proto data.
-  ONNX_NAMESPACE::ModelProto ToProto();
+  ONNX_NAMESPACE::ModelProto ToProto() const;
 
   // Get model's serialization proto data.
   // Save initializer larger than the given threshold (in bytes) into an external binary file
   // with the given name. This function is useful to avoid hitting the size limit of protobuf files.
-  ONNX_NAMESPACE::ModelProto ToGraphProtoWithExternalInitializers(const std::string& external_file_name,
-                                                                  size_t initializer_size_threshold);
+  // initializer offset could be page aligned and allocation granularity aligned for mmap support.
+  ONNX_NAMESPACE::ModelProto ToGraphProtoWithExternalInitializers(const std::filesystem::path& external_file_name,
+                                                                  const std::filesystem::path& file_path,
+                                                                  const ModelSavingOptions& model_saving_options) const;
 
-#ifdef _WIN32
-  static common::Status Save(Model& model, const std::wstring& file_path);
-#endif
-  static common::Status Save(Model& model, const std::string& file_path);
+  static common::Status Save(Model& model, const PathString& file_path);
 
   static common::Status Save(Model& model, int fd);
 
   // Save the model to file using an external file for initializers larger than the given threshold (in bytes).
-  // Notice that when on Windows the external_file_name is a plain string.
-  // This is because the string is saved inside the output protobuf as a plain string, where wchar is not supported.
-#ifdef _WIN32
+  // Initializer offset could be page aligned and allocation granularity aligned for mmap support.
   static common::Status SaveWithExternalInitializers(Model& model,
-                                                     const std::wstring& file_path,
-                                                     const std::string& external_file_name,
-                                                     size_t initializer_size_threshold);
-#else
-  static common::Status SaveWithExternalInitializers(Model& model,
-                                                     const std::string& file_path,
-                                                     const std::string& external_file_name,
-                                                     size_t initializer_size_threshold);
-#endif
+                                                     const std::filesystem::path& file_path,
+                                                     const std::filesystem::path& external_file_path,
+                                                     const ModelSavingOptions& save_options);
 
   static common::Status SaveWithExternalInitializers(Model& model,
                                                      int fd,
-                                                     const std::string& external_file_name,
-                                                     size_t initializer_size_threshold);
+                                                     const std::filesystem::path& file_path,
+                                                     const std::filesystem::path& external_file_path,
+                                                     const ModelSavingOptions& save_options);
 
   static common::Status Load(std::istream& model_istream, ONNX_NAMESPACE::ModelProto* p_model_proto);
 
@@ -207,61 +234,81 @@ class Model {
   static common::Status Load(const PathString& file_path,
                              /*out*/ std::shared_ptr<Model>& p_model,
                              const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                             const logging::Logger& logger);
+                             const logging::Logger& logger,
+                             const ModelOptions& options = {});
 
   static common::Status Load(int fd, /*out*/ ONNX_NAMESPACE::ModelProto& model_proto);
 
   static common::Status Load(int fd, /*out*/ std::shared_ptr<Model>& p_model,
                              const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                             const logging::Logger& logger);
+                             const logging::Logger& logger,
+                             const ModelOptions& options = {});
 
   static common::Status Load(int fd,
                              const PathString& model_path,
                              /*out*/ std::shared_ptr<Model>& p_model,
                              const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                             const logging::Logger& logger);
+                             const logging::Logger& logger,
+                             const ModelOptions& options = {});
 
   // 'int' rather than 'size_t' because of a protobuf design choice; let callers handle type checks
-  static common::Status LoadFromBytes(int count, void* pBytes,
+  static common::Status LoadFromBytes(int count, const void* pBytes,
                                       /*out*/ ONNX_NAMESPACE::ModelProto& model_proto);
 
   // 'int' rather than 'size_t' because of a protobuf design choice; let callers handle type checks
   static common::Status LoadFromBytes(int count, void* pBytes, /*out*/ std::shared_ptr<Model>& p_model,
                                       const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                                      const logging::Logger& logger);
+                                      const logging::Logger& logger,
+                                      const ModelOptions& options = {});
 
   // 'int' rather than 'size_t' because of a protobuf design choice; let callers handle type checks
   static common::Status LoadFromBytes(int count, void* pBytes,
                                       const PathString& model_path,
                                       /*out*/ std::shared_ptr<Model>& p_model,
                                       const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                                      const logging::Logger& logger);
+                                      const logging::Logger& logger,
+                                      const ModelOptions& options = {});
 
   static common::Status Load(const ONNX_NAMESPACE::ModelProto& model_proto, /*out*/ std::shared_ptr<Model>& p_model,
                              const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                             const logging::Logger& logger);
+                             const logging::Logger& logger,
+                             const ModelOptions& options = {});
 
   static common::Status Load(const ONNX_NAMESPACE::ModelProto& model_proto,
                              const PathString& model_path,
                              /*out*/ std::shared_ptr<Model>& p_model,
                              const IOnnxRuntimeOpSchemaRegistryList* local_registries,
-                             const logging::Logger& logger);
+                             const logging::Logger& logger,
+                             const ModelOptions& options = {});
 
   static common::Status Load(ONNX_NAMESPACE::ModelProto&& model_proto,
                              /*out*/ std::shared_ptr<Model>& p_model,
                              const IOnnxRuntimeOpSchemaRegistryList* local_registries,
                              const logging::Logger& logger,
-                             bool allow_released_opsets_only = true);
+                             const ModelOptions& options = {});
 
   static common::Status Load(ONNX_NAMESPACE::ModelProto&& model_proto,
                              const PathString& model_path,
                              /*out*/ std::shared_ptr<Model>& p_model,
                              const IOnnxRuntimeOpSchemaRegistryList* local_registries,
                              const logging::Logger& logger,
-                             bool allow_released_opsets_only = true);
+                             const ModelOptions& options = {});
+
+  static common::Status LoadFromModelEditorApiModel(const OrtModel& graph_api_model,
+                                                    const IOnnxRuntimeOpSchemaRegistryList* local_registries,
+                                                    const ModelOptions& options,
+                                                    const logging::Logger& logger,
+                                                    std::unique_ptr<Model>& model);
 
   common::Status SaveToOrtFormat(flatbuffers::FlatBufferBuilder& builder,
                                  flatbuffers::Offset<onnxruntime::fbs::Model>& model) const;
+
+  /// <summary>
+  /// Frees local function definitions in the model, excluding those in the `retained` set.
+  /// Called from GraphPartitioner::InlineFunctionsAOT.
+  /// </summary>
+  /// <param name="retained">contains function IDs that should not be removed.</param>
+  void RemoveLocalFunctionsProtos(const InlinedHashSet<std::string>& retained);
 
 #endif  // !defined(ORT_MINIMAL_BUILD)
 
@@ -269,6 +316,7 @@ class Model {
 #if !defined(ORT_MINIMAL_BUILD)
                                           const IOnnxRuntimeOpSchemaRegistryList* local_registries,
 #endif
+                                          const OrtFormatLoadOptions& load_options,
                                           const logging::Logger& logger,
                                           std::unique_ptr<Model>& model);
 
@@ -278,6 +326,17 @@ class Model {
   // Model data.
 #if !defined(ORT_MINIMAL_BUILD)
   ONNX_NAMESPACE::ModelProto model_proto_;
+  // map from function id to pointer of model local function proto
+  // FunctionProto is hosted in ModelProto.
+  // this map will be used for the local functions' schema's type/shape inference.
+  // This container is used by ONNX code and must be an std::unordered_map.
+  std::unordered_map<std::string, const ONNX_NAMESPACE::FunctionProto*> model_local_functions_;
+  // this is the map from function id to the local function template.
+  // this map will be used by graph to instantiate the function body.
+  // Defined as a node based map so the memory is released when not all of the functions
+  // are inlined and removed.
+  NodeHashMap<std::string, std::unique_ptr<FunctionTemplate>> model_local_function_templates_maps_;
+
 #else
   // properties that would normally come from ModelProto
   std::string producer_version_;
@@ -294,9 +353,11 @@ class Model {
   ModelMetaData model_metadata_;
 
   // Path to model file. May be empty.
-  const Path model_path_;
+  std::filesystem::path model_path_;
 
   // Main graph of the model.
   std::unique_ptr<Graph> graph_;
+
+  CheckLoadCancellationFn check_load_cancellation_fn_;
 };
 }  // namespace onnxruntime

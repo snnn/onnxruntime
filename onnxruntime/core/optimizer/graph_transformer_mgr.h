@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include "core/common/inlined_containers.h"
 #include "core/common/logging/logging.h"
 #include "core/optimizer/graph_transformer.h"
 #include "core/optimizer/constant_folding.h"
@@ -23,6 +24,16 @@ class GraphTransformerManager {
   // Get the maximum number of graph transformation steps
   common::Status GetSteps(unsigned& steps) const;
 
+  // Set the cancellation flag ptr from session_options
+  void SetLoadCancellationFn(CheckLoadCancellationFn check_load_cancellation_fn) {
+    check_load_cancellation_fn_ = std::move(check_load_cancellation_fn);
+  }
+
+  // Get the cancellation flag ptr
+  bool IsLoadCancellationFlagSet() const noexcept {
+    return check_load_cancellation_fn_ && check_load_cancellation_fn_();
+  }
+
   // Register a transformer with a level.
   common::Status Register(std::unique_ptr<GraphTransformer> transformer, TransformerLevel level);
 
@@ -32,20 +43,11 @@ class GraphTransformerManager {
  private:
   ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(GraphTransformerManager);
 
-  // Older GCC versions don't support std::hash with enum types
-  // Therefore, std::hash<T> appears to be undefined when T is an enum Type. This is fixed in version 6.1
-  // TODO: remove this when we update to 6.1 or later
-  struct EnumHashKey {
-    template <typename T>
-    size_t operator()(T t) const {
-      return static_cast<size_t>(t);
-    }
-  };
-
   // maximum number of graph transformation steps
   unsigned steps_;
 
-  std::unordered_map<TransformerLevel, std::vector<std::unique_ptr<GraphTransformer>>, EnumHashKey> level_to_transformer_map_;
-  std::unordered_map<std::string, GraphTransformer*> transformers_info_;
+  InlinedHashMap<TransformerLevel, InlinedVector<std::unique_ptr<GraphTransformer>>> level_to_transformer_map_;
+  InlinedHashMap<std::string, GraphTransformer*> transformers_info_;
+  CheckLoadCancellationFn check_load_cancellation_fn_;
 };
 }  // namespace onnxruntime

@@ -109,6 +109,16 @@ Return Value:
 }
 
 
+int32_t
+MlasQgemmGetKernelOutputCnt(
+    bool AIsSigned,
+    bool BIsSigned
+    )
+{
+    const auto* dispatch = MlasGemmQuantGetDispatch(AIsSigned, BIsSigned);
+    return int32_t(dispatch->StrideM);
+}
+
 #if defined(_MSC_VER) && !defined(__clang__)
 #pragma warning(push)
 // VC++ suggests we can attempt to make 'MlasBitsOfFp32' constexpr, but it is not valid.
@@ -134,14 +144,7 @@ MlasGemmBatch(
 
     const double Complexity = double(M) * double(N) * double(K) * double(BatchN);
 
-    ptrdiff_t TargetThreadCount;
-
-    if (Complexity < double(MLAS_QGEMM_THREAD_COMPLEXITY * GetMlasPlatform().MaximumThreadCount)) {
-        TargetThreadCount = ptrdiff_t(Complexity / double(MLAS_QGEMM_THREAD_COMPLEXITY)) + 1;
-    } else {
-        TargetThreadCount = GetMlasPlatform().MaximumThreadCount;
-    }
-
+    ptrdiff_t TargetThreadCount = ptrdiff_t(Complexity / double(MLAS_QGEMM_THREAD_COMPLEXITY)) + 1;
     ptrdiff_t MaximumThreadCount = MlasGetMaximumThreadCount(ThreadPool);
 
     if (TargetThreadCount >= MaximumThreadCount) {
@@ -192,6 +195,15 @@ MlasGemmBatch(
     });
 }
 
+
+int32_t
+MlasSymmQgemmGetKernelOutputCnt()
+{
+    const MLAS_SYMM_QGEMM_DISPATCH* dispatch = GetMlasPlatform().SymmQgemmDispatch;
+    return int32_t(dispatch->StrideM);
+}
+
+
 void
 MLASCALL
 MlasSymmQgemmBatch(
@@ -205,11 +217,13 @@ MlasSymmQgemmBatch(
     const size_t N = Shape.N;
     const size_t K = Shape.K;
     const MLAS_SYMM_QGEMM_DISPATCH* dispatch = GetMlasPlatform().SymmQgemmDispatch;
-    MLAS_SYMM_QGEMM_OPERATION* operation = dispatch->Operation;
 
     if (ThreadPool == nullptr) {
         // So our caller handles threaded job partition.
         // Call single threaded operation directly
+        auto uarch = MLAS_CPUIDINFO::GetCPUIDInfo().IsCurrentCoreArmv8NarrowLd();
+        MLAS_SYMM_QGEMM_OPERATION* operation =
+            uarch ? dispatch->LitOperation : dispatch->BigOperation;
 
         for (size_t gemm_i = 0; gemm_i < BatchN; gemm_i++) {
             auto Data = &DataParams[gemm_i];
@@ -258,6 +272,10 @@ MlasSymmQgemmBatch(
     ThreadsPerGemm = ThreadCountM * ThreadCountN;
 
     MlasTrySimpleParallel(ThreadPool, ThreadsPerGemm * BatchN, [&](ptrdiff_t tid) {
+        auto uarch = MLAS_CPUIDINFO::GetCPUIDInfo().IsCurrentCoreArmv8NarrowLd();
+        MLAS_SYMM_QGEMM_OPERATION* operation =
+            uarch ? dispatch->LitOperation : dispatch->BigOperation;
+
         const auto gemm_i = tid / ThreadsPerGemm;
         const auto blk_i = tid % ThreadsPerGemm;
         auto Data = &DataParams[gemm_i];
@@ -283,7 +301,7 @@ size_t
 MLASCALL
 MlasGemmPackBSize(
     size_t N,
-    size_t K, 
+    size_t K,
     bool AIsSigned,
     bool BIsSigned
     )
@@ -454,7 +472,7 @@ size_t
 MLASCALL
 MlasSymmQgemmPackBSize(
     size_t N,
-    size_t K, 
+    size_t K,
     bool AIsSigned
     )
 {

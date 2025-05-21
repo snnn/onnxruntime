@@ -5,10 +5,10 @@
 
 set -e
 set -x
-export PATH=/opt/python/cp37-cp37m/bin:$PATH
 
 BUILD_DIR=${1:?"usage: $0 <build directory>"}
 
+python3 -m pip install -r /onnxruntime_src/tools/ci_build/github/linux/python/requirements.txt
 # Validate the operator kernel registrations, as the ORT model uses hashes of the kernel registration details
 # to find kernels. If the hashes from the registration details are incorrect we will produce a model that will break
 # when the registration is fixed in the future.
@@ -22,18 +22,12 @@ python3 /onnxruntime_src/tools/ci_build/build.py \
     --build_dir ${BUILD_DIR} --cmake_generator Ninja \
     --config Debug \
     --skip_submodule_sync \
-    --parallel \
+    --parallel --use_vcpkg --use_vcpkg_ms_internal_asset_cache --use_binskim_compliant_compile_flags \
     --build_wheel \
     --skip_tests \
     --enable_training_ops \
-    --enable_pybind --cmake_extra_defines PYTHON_INCLUDE_DIR=/opt/python/cp37-cp37m/include/python3.7m PYTHON_LIBRARY=/usr/lib64/librt.so \
     --use_nnapi \
     --use_coreml
-
-# Run kernel def hash verification test
-pushd ${BUILD_DIR}/Debug
-ORT_TEST_STRICT_KERNEL_DEF_HASH_CHECK=1 ./onnxruntime_test_all --gtest_filter="KernelDefHashTest.ExpectedCpuKernelDefHashes"
-popd
 
 # Install the ORT python wheel
 python3 -m pip install --user ${BUILD_DIR}/Debug/dist/*
@@ -58,6 +52,13 @@ python3 /onnxruntime_src/tools/python/create_reduced_build_config.py --format OR
 # Config with type reduction
 python3 /onnxruntime_src/tools/python/create_reduced_build_config.py --format ORT --enable_type_reduction \
     /onnxruntime_src/onnxruntime/test/testdata \
+    /home/onnxruntimedev/.test_data/required_ops_and_types.ort_models.config
+
+# Append the info for ops involved from inside custom ops. These can't be read from the models as they're
+# dynamically created at runtime when the kernel is created.
+cat /onnxruntime_src/onnxruntime/test/testdata/ort_minimal_e2e_test_data/required_ops.standalone_invoker.config >> \
+    /home/onnxruntimedev/.test_data/required_ops.ort_models.config
+cat /onnxruntime_src/onnxruntime/test/testdata/ort_minimal_e2e_test_data/required_ops.standalone_invoker.config >> \
     /home/onnxruntimedev/.test_data/required_ops_and_types.ort_models.config
 
 # Test that we can convert an ONNX model with custom ops to ORT format

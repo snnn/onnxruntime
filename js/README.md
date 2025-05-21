@@ -17,23 +17,24 @@ are used for code-formatting and linting features for developers:
 - package.json
 - packages-lock.json
 - .eslintrc.js
-- .clang-format
+- .prettierignore
+- .prettierrc
 
 Please follow the steps described below to setup development environment.
 
 ### Prerequisites
 
-- Node.js (14.0+): https://nodejs.org/ - (Optional) Use nvm ([Windows](https://github.com/coreybutler/nvm-windows) / [Mac/Linux](https://github.com/creationix/nvm)) to install Node.js
+- Node.js (20.0+): https://nodejs.org/ - (Optional) Use nvm ([Windows](https://github.com/coreybutler/nvm-windows) / [Mac/Linux](https://github.com/creationix/nvm)) to install Node.js
 
-- Python (2.7 or 3.6+): https://www.python.org/downloads/
+- Python (3.9+): https://www.python.org/downloads/
 
   - python should be added to the PATH environment variable
 
 - Visual Studio Code: https://code.visualstudio.com/
 
   - **required** extension: [ESLint](https://marketplace.visualstudio.com/items?itemName=dbaeumer.vscode-eslint)
-  - **required** extension: [Clang-Format](https://marketplace.visualstudio.com/items?itemName=xaver.clang-format)
-  - **required** extension: [Debugger for Chrome](https://marketplace.visualstudio.com/items?itemName=msjsdiag.debugger-for-chrome)
+  - **required** extension: [Prettier](https://marketplace.visualstudio.com/items?itemName=SimonSiefke.prettier-vscode)
+  - **required** extension: [JavaScript Debugger](https://marketplace.visualstudio.com/items?itemName=ms-vscode.js-debug-nightly)
 
 - Chrome or Edge Browser
 
@@ -45,7 +46,7 @@ In `<ORT_ROOT>/js`, run:
 npm ci
 ```
 
-This will install Clang-format and ESLint for code-formatting and linting features. This is a one-time setup unless a `git clean` is performed or folder `<ORT_ROOT>/js/node_modules` is removed manually.
+This will install Prettier and ESLint for code-formatting and linting features. This is a one-time setup unless a `git clean` is performed or folder `<ORT_ROOT>/js/node_modules` is removed manually.
 
 ### Using VSCode:
 
@@ -57,7 +58,7 @@ To populate typescript type declarations, in each project folder, run `npm ci`.
 
 ### Run code formatter and linter manually
 
-In `<ORT_ROOT>/js`, use `npm run lint` to run ESLint , and use `npm run format` to run clang-format.
+In `<ORT_ROOT>/js`, use `npm run lint` to run ESLint , and use `npm run format` to run code formatter.
 
 ## onnxruntime-common
 
@@ -71,7 +72,7 @@ This project is designed to include all "common" code, which are pure javascript
 
 ### Requirements
 
-Node.js v12+ (recommended v14+)
+Node.js v20+
 
 ### Build
 
@@ -107,7 +108,7 @@ Document will be generated in folder `<ORT_ROOT>/js/common/docs`.
 
 > language: typescript/C++
 
-> dependency: onnxruntime-common, ONNXRuntime.dll
+> dependency: onnxruntime-common, ONNXRuntime shared library(.so/dll/dylib)
 
 > folder: <ORT_ROOT>/js/node
 
@@ -115,7 +116,7 @@ This project is designed to be used as a NPM package to enable Node.js users to 
 
 ### Requirements
 
-Node.js v12+ (recommended v14+)
+Node.js v20+
 
 ### Build
 
@@ -149,64 +150,7 @@ This project is a library for running ONNX models on browsers. It is the success
 
 ### Build
 
-1. Install NPM packages
-
-   1. in `<ORT_ROOT>/js/`, run `npm ci`.
-   2. in `<ORT_ROOT>/js/common/`, run `npm ci`.
-   3. in `<ORT_ROOT>/js/web/`, run `npm ci`.
-
-2. Prepare ONNX Runtime WebAssembly artifacts.
-
-   You can either use the prebuilt artifacts or build it by yourself.
-
-   - Setup by script.
-
-     In `<ORT_ROOT>/js/web/`, run `npm run pull:wasm` to pull WebAssembly artifacts for latest master branch from CI pipeline.
-
-   - Download artifacts from pipeline manually.
-
-     you can download prebuilt WebAssembly artifacts from [Windows WebAssembly CI Pipeline](https://dev.azure.com/onnxruntime/onnxruntime/_build?definitionId=161&_a=summary). Select a build, download artifacts "Release_ort-wasm" and "Release_ort-wasm-threaded" and unzip. See instructions below to put files into destination folders.
-
-   - Build WebAssembly artifacts.
-
-     1. Build ONNX Runtime WebAssembly
-
-        ~~Follow [instructions](https://www.onnxruntime.ai/docs/how-to/build.html#apis-and-language-bindings) for building ONNX Runtime WebAssembly. (TODO: document is not ready. we are working on it. Please see steps described as below.)~~
-
-        in `<ORT_ROOT>/`, run one of the following commands to build WebAssembly:
-
-        ```sh
-        # In windows, use 'build' to replace './build.sh'
-
-        # The following command build debug.
-        ./build.sh --build_wasm
-
-        # The following command build debug with debug info.
-        ./build.sh --build_wasm --skip_tests --enable_wasm_debug_info
-
-        # The following command build release.
-        ./build.sh --config Release --build_wasm --skip_tests --disable_wasm_exception_catching --disable_rtti
-        ```
-
-        To build with multi-thread support, append flag `--enable_wasm_threads` to the command. To build with SIMD support, append flag `--enable_wasm_simd` to the command. Make sure to build both single-thread and multi-thread with and without SIMD before next step.
-
-     2. Copy following files from build output folder to `<ORT_ROOT>/js/web/dist/`:
-
-        - ort-wasm.wasm
-        - ort-wasm-threaded.wasm (build with flag '--enable_wasm_threads')
-        - ort-wasm-simd.wasm (build with flag '--enable_wasm_simd')
-        - ort-wasm-simd-threaded.wasm (build with flags '--enable_wasm_threads --enable_wasm_simd')
-
-     3. Copy following files from build output folder to `<ORT_ROOT>/js/web/lib/wasm/binding/`:
-
-        - ort-wasm.js
-        - ort-wasm-threaded.js (build with flag '--enable_wasm_threads')
-        - ort-wasm-threaded.worker.js (build with flag '--enable_wasm_threads')
-
-3. Use following command in folder `<ORT_ROOT>/js/web` to build:
-   ```
-   npm run build
-   ```
+[onnxruntime-web build instructions](https://onnxruntime.ai/docs/build/web.html)
 
 ### Test
 
@@ -300,19 +244,19 @@ It should be able to consumed by both from projects that uses NPM packages (thro
 
 #### Reduced WebAssembly artifacts
 
-By default, the WebAssembly artifacts from onnxruntime-web package allows use of both standard ONNX models (.onnx) and ORT format models (.ort). There is an option to use a minimal build of ONNX Runtime to reduce the binary size, which only supports ORT format models. See also [ORT format model](https://onnxruntime.ai/docs/tutorials/mobile/overview.html) for more information.
+By default, the WebAssembly artifacts from onnxruntime-web package allows use of both standard ONNX models (.onnx) and ORT format models (.ort). There is an option to use a minimal build of ONNX Runtime to reduce the binary size, which only supports ORT format models. See also [ORT format model](https://onnxruntime.ai/docs/reference/ort-format-models.html) for more information.
 
 #### Reduced JavaScript bundle file fize
 
-By default, the main bundle file `ort.min.js` of ONNX Runtime Web contains all features. However, its size is over 500kB and for some scenarios we want a smaller sized bundle file, if we don't use all the features. The following table lists all available bundles with their support status of features.
+By default, the main bundle file `ort.all.min.js` of ONNX Runtime Web contains all features. However, its size is over 500kB and for some scenarios we want a smaller sized bundle file, if we don't use all the features. The following table lists all available bundles with their support status of features.
 
-|bundle file name|file size|file size (gzipped)|WebGL|WASM-core|WASM-proxy|WASM-threads|ES5 backward compatibility|
-|-|-|-|-|------|-----|---|-|
-|ort.es5.min.js|594.15KB|134.25KB|O|O|O|O|O|
-|ort.min.js|526.02KB|125.07KB|O|O|O|O|X|
-|ort.webgl.min.js|385.25KB|83.83KB|O|X|X|X|X|
-|ort.wasm.min.js|148.56|44KB|X|O|O|O|X|
-|ort.wasm-core.min.js|40.56KB|12.74KB|X|O|X|X|X|
+| bundle file name  | file size | file size (gzipped) | WebGL | WASM | WebGPU |
+| ----------------- | --------- | ------------------- | ----- | ---- | ------ |
+| ort.all.min.js    | 682 KB    | 166 KB              | O     | O    | O      |
+| ort.min.js        | 434 KB    | 102 KB              | O     | O    | X      |
+| ort.webgl.min.js  | 411 KB    | 93.6 KB             | O     | X    | X      |
+| ort.webgpu.min.js | 293 KB    | 80.1 KB             | X     | O    | O      |
+| ort.wasm.min.js   | 46 KB     | 14.8 KB             | X     | O    | X      |
 
 #### Build ONNX Runtime as a WebAssembly static library
 
@@ -339,7 +283,13 @@ This project provides an ONNX Runtime React Native JavaScript library to run ONN
 
 ### Models with ORT format
 
-By default, ONNX Runtime React Native leverages ONNX Runtime Mobile package with ORT format. Follow the [instruciton](https://onnxruntime.ai/docs/tutorials/mobile/model-conversion.html) to covert ONNX model to ORT format.
+Prior to ORT v1.13, the ONNX Runtime React Native package utilized the ONNX Runtime Mobile package, which required an ONNX model to be converted to ORT format.
+Follow these [instructions](https://onnxruntime.ai/docs/reference/ort-format-models.html#convert-onnx-models-to-ort-format) to convert ONNX model to ORT format.
+Note that the ONNX Runtime Mobile package includes a reduced set of operators and types, so not all models are supported. See [here](https://onnxruntime.ai/docs/reference/operators/MobileOps.html) for the list of supported operators and types.
+
+From ORT v1.13 onwards, the 'full' ONNX Runtime package is used. It supports both ONNX and ORT format models, and all operators and types.
+
+From ORT v1.19 onwards, the ONNX Runtime Mobile packages are no longer published.
 
 ### Build
 
@@ -349,83 +299,165 @@ By default, ONNX Runtime React Native leverages ONNX Runtime Mobile package with
    - in `<ORT_ROOT>/js/common/`, run `npm ci`.
    - in `<ORT_ROOT>/js/react_native/`, run `yarn`.
 
-2. Build Android ONNX Runtime package
+2. Acquire or build the Android ONNX Runtime package
 
-   1. To use a published Android ONNX Runtime Mobile package from Maven, go to step 5.
+   1. To use a published Android ONNX Runtime package from Maven, go to step 5.
 
-   2. Set up an Android build environment referring to [instruction](https://www.onnxruntime.ai/docs/how-to/build/android-ios.html#android)
+   2. Set up an Android build environment using these [instructions](https://onnxruntime.ai/docs/build/android.html). Note that the dependencies are quite convoluted, so using the specified JDK and Gradle versions is important.
 
-   3. In `<ORT_ROOT>`, run this python script to build ONNX Runtime Android archive file. In windows, this requires an admin account to build. To build a model specific package with reduced size, refer to [instruction](https://www.onnxruntime.ai/docs/how-to/build/reduced.html#build-ort-with-reduced-size).
+   3. In `<ORT_ROOT>`, run the below python script to build the ONNX Runtime Android archive file. On a Windows machine, this requires an admin account to build.
+
+   You can build a 'full' package that supports all operators and types, or a reduced size package that supports a limited set of operators and types based on your model/s to miminize the binary size.
+   See [here](https://onnxruntime.ai/docs/build/custom.html) for information about how the reduced build works, including creating the configuration file using your model/s.
+   The instructions here show how to build a 'full' package.
+
+   ```sh
+   python tools/ci_build/github/android/build_aar_package.py tools/ci_build/github/android/default_full_aar_build_settings.json --config Release --android_sdk_path <ANDROID_SDK_PATH> --android_ndk_path <ANDROID_NDK_PATH> --build_dir <BUILD_DIRECTORY>
+   ```
+
+   4. Move the generated ONNX Runtime Android archive file to `<ORT_ROOT>/js/react_native/android/libs/`.
+
+      Copy `<BUILD_DIRECTORY>/aar_out/Release/com/microsoft/onnxruntime/onnxruntime-android/<version>/onnxruntime-android-<version>.aar` into `<ORT_ROOT>/js/react_native/android/libs` directory.
+
+   5. To verify, open the Android Emulator and run this command from `<ORT_ROOT>/js/react_native/android`
 
       ```sh
-      python tools/ci_build/github/android/build_aar_package.py tools/ci_build/github/android/default_mobile_aar_build_settings.json --config MinSizeRel --android_sdk_path <ANDROID_SDK_PATH> --android_ndk_path <ANDROID_NDK_PATH> --build_dir <BUILD_DIRECTORY> --include_ops_by_config tools/ci_build/github/android/mobile_package.required_operators.config
-      ```
-
-   4. Copy `<BUILD_DIRECTORY>/aar_out/MinSizeRel/com/microsoft/onnxruntime/onnxruntime-mobile/<version>/onnxruntime-mobile-<version>.aar` into `<ORT_ROOT>/js/react_native/android/libs` directory.
-
-   5. Modify `Onnxruntime_mobileVersion` property in `<ORT_ROOT>/js/react_native/android/build.properties` to consume a locally built package or a newly published package from Maven.
-
-   6. To verify, open Android Emulator and run this command from `<ORT_ROOT>/js/react_native/android`
-
-      ```sh
-      adb shell am instrument -w ai.onnxruntime.react_native.test/androidx.test.runner.AndroidJUnitRunner
+      ./gradlew connectedDebugAndroidTest
       ```
 
 3. Build iOS ONNX Runtime package
 
-   1. To use a published c/c++ ONNX Runtime Mobile package from CocoaPods, skip all steps below.
+   1. To use the published C/C++ ONNX Runtime package from CocoaPods, skip all steps below.
 
-   2. Set up iOS build environment referring to [instruction](https://www.onnxruntime.ai/docs/how-to/build/android-ios.html#ios).
+   2. Set up iOS build environment using these [instructions](https://onnxruntime.ai/docs/build/ios.html).
 
-   3. Build a fat ONNX Runtime Mobile Framework for iOS and iOS simulator from `<ORT_ROOT>` using this command,
-
-      ```sh
-      python tools/ci_build/github/apple/build_ios_framework.py tools/ci_build/github/apple/default_mobile_ios_framework_build_settings.json --config MinSizeRel --include_ops_by_config tools/ci_build/github/android/mobile_package.required_operators.config
-      ```
-
-      It creates `Headers`, `LICENSE`, and `onnxruntime.xcframework` in `build/iOS_framework/framework_out` directory. From `framework_out` directory, create an archive file named `onnxruntime-mobile-c.zip` as follows and copy to `<ORT_ROOT>/js/react_native/local_pods` directory.
+   3. Build a fat ONNX Runtime Framework for iOS and iOS simulator from `<ORT_ROOT>` using this command:
 
       ```sh
-      zip -r onnxruntime-mobile-c.zip .
+      python tools/ci_build/github/apple/build_apple_framework.py tools/ci_build/github/apple/default_full_apple_framework_build_settings.json --config Release
       ```
 
-   4. To verify, open iOS Simulator and run this command from `<ORT_ROOT>/js/react_native/ios`. Change a destination to specify a running iOS Simulator.
+      The build creates `Headers`, `LICENSE`, and `onnxruntime.xcframework` in `build/iOS_framework/framework_out` directory. From `framework_out` directory, create an archive file named `onnxruntime-c.zip` and copy to `<ORT_ROOT>/js/react_native/local_pods` directory.
+
+      ```sh
+      zip -r onnxruntime-c.zip .
+      ```
+
+   4. To verify, open the iOS Simulator and run the below command from `<ORT_ROOT>/js/react_native/ios`. Change the destination argument as needed to specify a running iOS Simulator.
 
       ```sh
       pod install
-      xcodebuild test -workspace OnnxruntimeModule.xcworkspace -scheme OnnxruntimeModuleTest -destination 'platform=iOS Simulator,name=iPhone 11,OS=15.0'
+      xcodebuild test -workspace OnnxruntimeModule.xcworkspace -scheme OnnxruntimeModuleTest -destination 'platform=iOS Simulator,OS=latest,name=iPhone 13'
       ```
 
-4. Test an example for Android and iOS. In Windows, open Android Emulator first.
+4. Test Android and iOS apps. In Windows, open Android Emulator first.
 
    `debug.keystore` must be generated ahead for Android example.
 
    ```sh
-   keytool -genkey -v -keystore <ORT_ROOT>/js/react_native/example/android/app/debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 999999 -dname "CN=Android Debug,O=Android,C=US"
+   keytool -genkey -v -keystore <ORT_ROOT>/js/react_native/e2e/android/debug.keystore -alias androiddebugkey -storepass android -keypass android -keyalg RSA -keysize 2048 -validity 999999 -dname "CN=Android Debug,O=Android,C=US"
    ```
 
    From `<ORT_ROOT>/js/react_native,
 
    ```sh
-   yarn bootstrap
-   yarn example ios
-   yarn example android
+   npm run bootstrap
+   ```
+
+   When testing with a custom built ONNX Runtime Android package, copy `<BUILD_DIRECTORY>/aar_out/MinSizeRel/com/microsoft/onnxruntime/onnxruntime-android/<version>/onnxruntime-android-<version>.aar` into the `<ORT_ROOT>/js/react_native/e2e/android/app/libs` directory.
+
+   When testing with a custom built ONNX Runtime iOS package, copy `onnxruntime-c.zip` into the `<ORT_ROOT>/js/react_native/local_pods` directory.
+
+- Run E2E Testing with Detox framework
+
+  When testing with integrated [Detox](https://wix.github.io/Detox/docs/next/introduction/getting-started) framework for Android and iOS e2e apps:
+
+  - Detox prerequisites:
+
+    Install detox command line tools:
+
+    ```
+    npm install -g detox-cli
+    ```
+
+    Install applesimutils which is required by Detox to work with iOS simulators. (Requires a MacOS device)
+
+    ```
+    brew tap wix/brew
+    brew install applesimutils
+    ```
+
+    Main Detox project files:
+
+    - `.detoxrc.js` -Detox config file;
+    - `e2e/jest.config.js` -Jest configuration;
+    - `e2e/OnnxruntimeModuleExample.test.js` - initial react native onnxruntimemodule e2e detox test.
+
+  - Build the detox e2e testing app.
+
+    From `<ORT_ROOT>/js/react_native/e2e`, run the command to build the e2e testing app. Before that ensure you have android emulator/ios simulator started locally.
+
+    iOS (Debug):
+
+    ```
+    detox build --configuration ios.sim.debug
+    ```
+
+    Android (Debug):
+
+    ```
+    detox build --configuration android.emu.debug
+    ```
+
+    - Note: If names of local testing android/ios devices do not match the default setting in `.detoxrc.js` file,
+      modify the device name in config files accordingly to match local device name otherwise would cause a build failure.
+
+  - Run the detox e2e tests.
+
+    In a debug configuration, you need to have React Native packager running in parallel before you start Detox tests:
+
+    ```
+    npm start
+
+    > react-native start
+    ```
+
+    From `<ORT_ROOT>/js/react_native/e2e`, run Detox tests using the following command:
+
+    iOS (Debug):
+
+    ```
+    detox test --configuration ios.sim.debug
+    ```
+
+    Android (Debug):
+
+    ```
+    detox test --configuration android.emu.debug
+    ```
+
+    To record logs for testing results, add `--record-logs`. Output logs and test results will be produced in the `e2e/artifacts/` folder.
+    See: [Detox/logger#artifacts](https://wix.github.io/Detox/docs/api/logger#artifacts)
+
+    **_`npm run bootstrap` changes `packages.json` and `package-lock.json` files. Once testing is done, restore changes to avoid unwanted commit._**
+
+5. Run Android and iOS apps.
+
+   ```sh
+   npm run e2e:android
+   npm run e2e:ios
    ```
 
 ### NPM Packaging
 
-1. Update a version using `npm verison <version>` from `<ORT_ROOT>/js/react_native` folder. If it's for a dev, use `npm version <version>-dev.<subversion>`
+1. Update a version using `npm version <version>` from `<ORT_ROOT>/js/react_native` folder. If it's for a dev, use `npm version <version>-dev.<subversion>`
 
-2. Modify Onnxruntime_mobileVersion property in `<ORT_ROOT>/js/react_native/android/build.properties` to update ONNX Runtime Android package version.
+2. Run `npm pack` and verify NPM package contents
 
-3. Run `yarn prepack` to change `onnxruntime-common` to point to a published npm package
+3. Run `npm publish <tgz> --dry-run` to see how it's going to be published
 
-4. Run `npm pack` and verify NPM package contents
-
-5. Run `npm publish <tgz> --dry-run` to see how it's going to be published
-
-6. Run `npm publish <tgz>` to publish to npmjs. If it's for a dev, add flag `--tag dev`.
+4. Run `npm publish <tgz>` to publish to npmjs. If it's for a dev, add flag `--tag dev`.
 
 ### Distribution
 
-It should be able to consumed by React Native projects that uses Yarn packages through `yarn add onnxruntime-react-native`.
+It should be able to consumed by React Native projects that uses npm packages through `npm install onnxruntime-react-native`.

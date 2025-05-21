@@ -4,9 +4,11 @@
 #include <typeinfo>
 #include <cmath>
 
+#include "core/common/inlined_containers.h"
 #include "core/framework/data_types.h"
 #include "core/framework/data_types_internal.h"
-#include "core/framework/inlined_containers.h"
+#include "core/framework/float16.h"
+#include "core/framework/float8.h"
 #include "core/graph/onnx_protobuf.h"
 #include "gtest/gtest.h"
 
@@ -169,7 +171,9 @@ struct TensorShapeTypeProto {
 };
 
 template <>
-struct TensorShapeTypeProto<> { TensorShapeProto proto; };
+struct TensorShapeTypeProto<> {
+  TensorShapeProto proto;
+};
 
 template <TensorProto_DataType T>
 struct TensorTypeProto {
@@ -417,13 +421,185 @@ TEST_F(DataTypeTest, VectorMapInt64ToFloatTest) {
 }
 #endif  // !defined(DISABLE_ML_OPS)
 
-TEST_F(DataTypeTest, BFloat16Test) {
+TEST_F(DataTypeTest, MlFloat16ConvertFloatToMLFloat16) {
   // Test data type
   {
     constexpr float sample = 1.0f;
-    BFloat16 flt16(sample);
+    const MLFloat16 flt16(sample);
     auto int_rep = flt16.val;
-    BFloat16 flt_from_int(int_rep, BFloat16::FromBits());
+    const auto flt_from_int = MLFloat16::FromBits(int_rep);
+    const double diff = std::fabs(sample - flt_from_int.ToFloat());
+    if (diff > FLT_EPSILON || (std::isnan(diff) && !std::isnan(sample))) {
+      EXPECT_TRUE(false);
+    }
+  }
+  // Test bulk conversion
+  {
+    float sample[] = {1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
+    std::vector<MLFloat16> converted;
+    std::transform(std::begin(sample), std::end(sample), std::back_inserter(converted),
+                   [](float fl) { return MLFloat16(fl); });
+    for (size_t i = 0; i < sizeof(sample) / sizeof(float); ++i) {
+      const double diff = std::fabs(sample[i] - converted[i].ToFloat());
+      if ((std::isnan(diff) && !std::isnan(sample[i])) || diff > FLT_EPSILON) {
+        FAIL();
+      }
+    }
+
+    std::vector<float> back_converted;
+    std::transform(converted.cbegin(), converted.cend(), std::back_inserter(back_converted),
+                   [](const MLFloat16 ml) { return (float)ml; });
+    for (size_t i = 0; i < sizeof(sample) / sizeof(float); ++i) {
+      const double diff = std::fabs(sample[i] - back_converted[i]);
+      if ((std::isnan(diff) && !std::isnan(sample[i])) || diff > FLT_EPSILON) {
+        FAIL();
+      }
+    }
+  }
+}
+
+TEST_F(DataTypeTest, MLFloat16Zeros) {
+  const auto positive_zero = MLFloat16::FromBits(0U);
+  EXPECT_FALSE(positive_zero.IsNegative());
+  const float float_positive_zero = static_cast<float>(positive_zero);
+  EXPECT_EQ(+0.0f, float_positive_zero);
+  EXPECT_FALSE(std::signbit(float_positive_zero));
+
+  const auto negative_zero = positive_zero.Negate();
+  EXPECT_TRUE(negative_zero.IsNegative());
+  const float float_positive_negzero = static_cast<float>(negative_zero);
+  EXPECT_EQ(-0.0f, float_positive_negzero);
+  EXPECT_TRUE(std::signbit(float_positive_negzero));
+
+  EXPECT_TRUE(positive_zero.IsNaNOrZero());
+  EXPECT_TRUE(negative_zero.IsNaNOrZero());
+}
+
+TEST_F(DataTypeTest, MLFloat16Comparision) {
+  const MLFloat16 left = MLFloat16(-33.33f);
+  const MLFloat16 left_same = MLFloat16(-33.33f);
+  const MLFloat16 right = MLFloat16(66.66f);
+  const MLFloat16 right_same = MLFloat16(66.66f);
+
+  EXPECT_TRUE(MLFloat16::One < right);
+
+  EXPECT_EQ(left, left_same);
+  EXPECT_NE(left, left_same.Negate());
+
+  EXPECT_EQ(right, right_same);
+  EXPECT_NE(right, right_same.Negate());
+
+  EXPECT_LT(left, right);
+  EXPECT_LT(right.Negate(), left);
+  EXPECT_LT(left.Negate(), right);
+}
+
+TEST_F(DataTypeTest, MLFloat16TestNAN) {
+  const MLFloat16 quiet_NaN = std::numeric_limits<MLFloat16>::quiet_NaN();
+  EXPECT_TRUE(quiet_NaN.IsNaN());
+  EXPECT_TRUE(quiet_NaN.IsNaNOrZero());
+  EXPECT_NE(MLFloat16::NaN, quiet_NaN);  // NaN are not equal to each other
+  EXPECT_TRUE(std::isnan(quiet_NaN.ToFloat()));
+
+  const MLFloat16 signaling_NaN = std::numeric_limits<MLFloat16>::signaling_NaN();
+  EXPECT_TRUE(signaling_NaN.IsNaN());
+  EXPECT_TRUE(signaling_NaN.IsNaNOrZero());
+  EXPECT_NE(MLFloat16::NaN, signaling_NaN);  // NaN are not equal to each other
+  EXPECT_TRUE(std::isnan(signaling_NaN.ToFloat()));
+
+  // NaN used in C# has negative sign
+  const MLFloat16 csharp_NaN = MLFloat16::FromBits(0xFE00U);
+  EXPECT_TRUE(csharp_NaN.IsNaN());
+  EXPECT_TRUE(csharp_NaN.IsNaNOrZero());
+  EXPECT_NE(BFloat16::NaN, csharp_NaN);
+  EXPECT_TRUE(std::isnan(csharp_NaN.ToFloat()));
+
+  const MLFloat16 fp16NANFromSingle(std::numeric_limits<float>::quiet_NaN());
+  EXPECT_TRUE(fp16NANFromSingle.IsNaN());
+  EXPECT_TRUE(fp16NANFromSingle.IsNaNOrZero());
+
+  // NaN are not equal to each other
+  EXPECT_NE(MLFloat16::NaN, fp16NANFromSingle);
+
+  const float NanFromBFloat16 = fp16NANFromSingle.ToFloat();
+  EXPECT_TRUE(std::isnan(NanFromBFloat16));
+
+  EXPECT_FALSE(MLFloat16::FromBits(MLFloat16::kMaxValueBits).IsNaN());
+}
+
+TEST_F(DataTypeTest, MLFloat16NaNComparision) {
+  EXPECT_FALSE(MLFloat16::NaN < MLFloat16::NaN);
+  EXPECT_FALSE(MLFloat16::NaN == MLFloat16::NaN);
+
+  EXPECT_FALSE(MLFloat16::MaxValue < MLFloat16::NaN);
+  EXPECT_FALSE(MLFloat16::MaxValue == MLFloat16::NaN);
+  EXPECT_FALSE(MLFloat16::MaxValue.Negate() < MLFloat16::NaN);
+  EXPECT_FALSE(MLFloat16::NaN < MLFloat16::MaxValue);
+
+  EXPECT_TRUE(MLFloat16::Zero < MLFloat16::MaxValue);
+}
+
+TEST_F(DataTypeTest, MLFloat16Infinity) {
+  const MLFloat16 fp16_infinity(std::numeric_limits<MLFloat16>::infinity());
+  EXPECT_TRUE(fp16_infinity.IsInfinity());
+  EXPECT_FALSE(fp16_infinity.IsFinite());
+  EXPECT_FALSE(fp16_infinity.IsNegative());
+
+  EXPECT_FALSE(MLFloat16::MaxValue.Negate().IsInfinity());
+  EXPECT_FALSE(MLFloat16::MaxValue.IsInfinity());
+  EXPECT_TRUE(MLFloat16::MaxValue.IsFinite());
+
+  const MLFloat16 pos_infinity_from_float(std::numeric_limits<float>::infinity());
+  EXPECT_TRUE(pos_infinity_from_float.IsInfinity());
+  EXPECT_FALSE(pos_infinity_from_float.IsFinite());
+  EXPECT_FALSE(pos_infinity_from_float.IsNegative());
+
+  const MLFloat16 neg_infinity_from_float(-std::numeric_limits<float>::infinity());
+  EXPECT_TRUE(neg_infinity_from_float.IsInfinity());
+  EXPECT_FALSE(neg_infinity_from_float.IsFinite());
+  EXPECT_TRUE(neg_infinity_from_float.IsNegative());
+
+  const float pos_infinity_from_bfloat16 = static_cast<float>(MLFloat16::Infinity);
+  EXPECT_TRUE(std::isinf(pos_infinity_from_bfloat16));
+  EXPECT_TRUE(!std::signbit(pos_infinity_from_bfloat16));
+}
+
+TEST_F(DataTypeTest, MLFloat16NormalSubnormal) {
+  EXPECT_FALSE(MLFloat16::Infinity.IsNormal());
+  EXPECT_TRUE(MLFloat16(45.6f).IsNormal());
+  EXPECT_FALSE(MLFloat16(45.6f).IsSubnormal());
+
+  // 0b0_0000_0000_000_0001 ~0.000000059604645
+  constexpr uint16_t min_subnormal_bits = 0x0001;
+  const MLFloat16 smallest_subnormal = MLFloat16::FromBits(min_subnormal_bits);
+  EXPECT_TRUE(smallest_subnormal.IsSubnormal());
+  EXPECT_FALSE(smallest_subnormal.IsNormal());
+
+  EXPECT_EQ(smallest_subnormal, std::numeric_limits<MLFloat16>::denorm_min());
+
+  // float smallest positive subnormal is ~1.40129846432481707092E-45, and
+  // in float the same number above would be normal
+  const float float_from_smallest_subnormal = static_cast<float>(smallest_subnormal);
+  EXPECT_TRUE(std::isnormal(float_from_smallest_subnormal));
+
+  // 0b0_0000_0000_111_1111; ~0.000060975552
+  constexpr uint16_t max_subnormal_bits = 0x007F;
+  const MLFloat16 largest_subnormal = MLFloat16::FromBits(max_subnormal_bits);
+  EXPECT_TRUE(largest_subnormal.IsSubnormal());
+  EXPECT_FALSE(largest_subnormal.IsNormal());
+
+  // However, in float the same number above would be normal
+  const float float_from_largest_subnormal = static_cast<float>(largest_subnormal);
+  EXPECT_TRUE(std::isnormal(float_from_largest_subnormal));
+}
+
+TEST_F(DataTypeTest, BFloat16ConvertFloatToBFloat16) {
+  // Test data type
+  {
+    constexpr float sample = 1.0f;
+    const BFloat16 flt16(sample);
+    auto int_rep = flt16.val;
+    const auto flt_from_int = BFloat16::FromBits(int_rep);
     const double diff = std::fabs(sample - flt_from_int.ToFloat());
     if (diff > FLT_EPSILON || (std::isnan(diff) && !std::isnan(sample))) {
       EXPECT_TRUE(false);
@@ -452,6 +628,185 @@ TEST_F(DataTypeTest, BFloat16Test) {
     }
   }
 }
+
+TEST_F(DataTypeTest, BFloat16Zeros) {
+  const auto positive_zero = BFloat16::FromBits(0U);
+  EXPECT_FALSE(positive_zero.IsNegative());
+  const float float_positive_zero = static_cast<float>(positive_zero);
+  EXPECT_EQ(+0.0f, float_positive_zero);
+  EXPECT_FALSE(std::signbit(float_positive_zero));
+
+  const auto negative_zero = positive_zero.Negate();
+  EXPECT_TRUE(negative_zero.IsNegative());
+  const float float_positive_negzero = static_cast<float>(negative_zero);
+  EXPECT_EQ(-0.0f, float_positive_negzero);
+  EXPECT_TRUE(std::signbit(float_positive_negzero));
+
+  EXPECT_TRUE(positive_zero.IsNaNOrZero());
+  EXPECT_TRUE(negative_zero.IsNaNOrZero());
+}
+
+TEST_F(DataTypeTest, BFloat16Comparision) {
+  const BFloat16 left = BFloat16(-33.33f);
+  const BFloat16 left_same = BFloat16(-33.33f);
+  const BFloat16 right = BFloat16(66.66f);
+  const BFloat16 right_same = BFloat16(66.66f);
+
+  EXPECT_TRUE(BFloat16::One < right);
+
+  EXPECT_EQ(left, left_same);
+  EXPECT_NE(left, left_same.Negate());
+
+  EXPECT_EQ(right, right_same);
+  EXPECT_NE(right, right_same.Negate());
+
+  EXPECT_LT(left, right);
+  EXPECT_LT(right.Negate(), left);
+  EXPECT_LT(left.Negate(), right);
+}
+
+TEST_F(DataTypeTest, BFloat16TestNAN) {
+  const BFloat16 quiet_NaN = std::numeric_limits<BFloat16>::quiet_NaN();
+  EXPECT_TRUE(quiet_NaN.IsNaN());
+  EXPECT_TRUE(quiet_NaN.IsNaNOrZero());
+  EXPECT_NE(BFloat16::NaN, quiet_NaN);
+  EXPECT_TRUE(std::isnan(quiet_NaN.ToFloat()));
+
+  const BFloat16 signaling_NaN = std::numeric_limits<BFloat16>::signaling_NaN();
+  EXPECT_TRUE(signaling_NaN.IsNaN());
+  EXPECT_TRUE(signaling_NaN.IsNaNOrZero());
+  EXPECT_NE(BFloat16::NaN, signaling_NaN);
+  EXPECT_TRUE(std::isnan(signaling_NaN.ToFloat()));
+
+  const BFloat16 csharp_NaN = BFloat16::FromBits(0xFFC1U);
+  EXPECT_TRUE(csharp_NaN.IsNaN());
+  EXPECT_TRUE(csharp_NaN.IsNaNOrZero());
+  EXPECT_NE(BFloat16::NaN, csharp_NaN);
+  EXPECT_TRUE(std::isnan(csharp_NaN.ToFloat()));
+
+  const BFloat16 fp16NANFromSingle = std::numeric_limits<float>::quiet_NaN();
+  EXPECT_TRUE(fp16NANFromSingle.IsNaN());
+  EXPECT_TRUE(fp16NANFromSingle.IsNaNOrZero());
+  // NaN are not equal to each other
+  EXPECT_NE(BFloat16::NaN, fp16NANFromSingle);
+
+  float NanFromBFloat16 = fp16NANFromSingle.ToFloat();
+  EXPECT_TRUE(std::isnan(NanFromBFloat16));
+
+  EXPECT_FALSE(BFloat16::FromBits(BFloat16::kMaxValueBits).IsNaN());
+}
+
+TEST_F(DataTypeTest, BFloat16NaNComparision) {
+  EXPECT_FALSE(BFloat16::NaN < BFloat16::NaN);
+  EXPECT_FALSE(BFloat16::NaN == BFloat16::NaN);
+
+  EXPECT_FALSE(BFloat16::MaxValue < BFloat16::NaN);
+  EXPECT_FALSE(BFloat16::MaxValue == BFloat16::NaN);
+  EXPECT_FALSE(BFloat16::MaxValue.Negate() < BFloat16::NaN);
+  EXPECT_FALSE(BFloat16::NaN < BFloat16::MaxValue);
+
+  EXPECT_TRUE(BFloat16::Zero < BFloat16::MaxValue);
+}
+
+TEST_F(DataTypeTest, BFloat16Infinity) {
+  EXPECT_FALSE(BFloat16::MaxValue.Negate().IsInfinity());
+  EXPECT_FALSE(BFloat16::MaxValue.IsInfinity());
+  EXPECT_TRUE(BFloat16::MaxValue.IsFinite());
+
+  const BFloat16 pos_infinity_from_float = std::numeric_limits<float>::infinity();
+  EXPECT_TRUE(pos_infinity_from_float.IsInfinity());
+  EXPECT_FALSE(pos_infinity_from_float.IsFinite());
+  EXPECT_FALSE(pos_infinity_from_float.IsNegative());
+
+  const BFloat16 neg_infinity_from_float = -std::numeric_limits<float>::infinity();
+  EXPECT_TRUE(neg_infinity_from_float.IsInfinity());
+  EXPECT_FALSE(neg_infinity_from_float.IsFinite());
+  EXPECT_TRUE(neg_infinity_from_float.IsNegative());
+  EXPECT_TRUE(std::signbit(neg_infinity_from_float.ToFloat()));
+
+  const float pos_infinity_from_bfloat16 = static_cast<float>(BFloat16::Infinity);
+  EXPECT_TRUE(std::isinf(pos_infinity_from_bfloat16));
+  EXPECT_TRUE(!std::signbit(pos_infinity_from_bfloat16));
+}
+
+TEST_F(DataTypeTest, BFloat16NormalSubnormal) {
+  EXPECT_FALSE(BFloat16::Infinity.IsNormal());
+  EXPECT_TRUE(BFloat16(45.6f).IsNormal());
+  EXPECT_FALSE(BFloat16(45.6f).IsSubnormal());
+
+  // 0b0_0000_0000_000_0001
+  constexpr uint16_t min_subnormal_bits = 0x0001;
+  const BFloat16 smallest_subnormal = BFloat16::FromBits(min_subnormal_bits);
+  EXPECT_TRUE(smallest_subnormal.IsSubnormal());
+  EXPECT_FALSE(smallest_subnormal.IsNormal());
+
+  EXPECT_EQ(smallest_subnormal, std::numeric_limits<BFloat16>::denorm_min());
+
+  const float float_from_smallest_subnormal = (float)smallest_subnormal;
+  EXPECT_FALSE(std::isnormal(float_from_smallest_subnormal));
+
+  // 0b0_0000_0000_111_1111;
+  constexpr uint16_t max_subnormal_bits = 0x007F;
+  const BFloat16 largest_subnormal = BFloat16::FromBits(max_subnormal_bits);
+  EXPECT_TRUE(largest_subnormal.IsSubnormal());
+  EXPECT_FALSE(largest_subnormal.IsNormal());
+
+  const float float_from_largest_subnormal = (float)largest_subnormal;
+  EXPECT_FALSE(std::isnormal(float_from_largest_subnormal));
+}
+
+#if !defined(DISABLE_FLOAT8_TYPES)
+TEST_F(DataTypeTest, Float8TestNAN) {
+  const auto fp8_e4m3fn_nan = std::numeric_limits<onnxruntime::Float8E4M3FN>::quiet_NaN();
+  EXPECT_TRUE(fp8_e4m3fn_nan.IsNaN());
+  EXPECT_TRUE(std::isnan(fp8_e4m3fn_nan.ToFloat()));
+
+  const auto fp8_e5m2_nan = std::numeric_limits<onnxruntime::Float8E5M2>::quiet_NaN();
+  EXPECT_TRUE(fp8_e5m2_nan.IsNaN());
+  EXPECT_TRUE(std::isnan(fp8_e5m2_nan.ToFloat()));
+
+  const auto fp8_e4m3fnuz_nan = std::numeric_limits<onnxruntime::Float8E4M3FNUZ>::quiet_NaN();
+  EXPECT_TRUE(fp8_e4m3fnuz_nan.IsNaN());
+  EXPECT_TRUE(std::isnan(fp8_e4m3fnuz_nan.ToFloat()));
+
+  const auto fp8_e5m2fnuz_nan = std::numeric_limits<onnxruntime::Float8E5M2FNUZ>::quiet_NaN();
+  EXPECT_TRUE(fp8_e5m2fnuz_nan.IsNaN());
+  EXPECT_TRUE(std::isnan(fp8_e5m2fnuz_nan.ToFloat()));
+}
+
+TEST_F(DataTypeTest, Float8TestInf) {
+  const auto fp8_e5m2_inf = std::numeric_limits<onnxruntime::Float8E5M2>::infinity();
+  EXPECT_TRUE(fp8_e5m2_inf.IsInfinity());
+  EXPECT_TRUE(std::isinf(fp8_e5m2_inf.ToFloat()));
+
+  EXPECT_FALSE(std::numeric_limits<onnxruntime::Float8E4M3FN>::has_infinity);
+  EXPECT_FALSE(std::numeric_limits<onnxruntime::Float8E4M3FNUZ>::has_infinity);
+  EXPECT_FALSE(std::numeric_limits<onnxruntime::Float8E5M2FNUZ>::has_infinity);
+}
+
+TEST_F(DataTypeTest, Float8TestLimits) {
+  constexpr float abs_tolerance = 1e-6f;
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E4M3FN>::min().ToFloat(), 0.015625f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E4M3FN>::max().ToFloat(), 448.0f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E4M3FN>::lowest().ToFloat(), -448.0f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E4M3FN>::denorm_min().ToFloat(), 0.001953125f, abs_tolerance);
+
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E5M2>::min().ToFloat(), 0.00006103515f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E5M2>::max().ToFloat(), 57344.0f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E5M2>::lowest().ToFloat(), -57344.0f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E5M2>::denorm_min().ToFloat(), 0.00001525878f, abs_tolerance);
+
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E4M3FNUZ>::min().ToFloat(), 0.0078125f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E4M3FNUZ>::max().ToFloat(), 240.0f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E4M3FNUZ>::lowest().ToFloat(), -240.0f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E4M3FNUZ>::denorm_min().ToFloat(), 0.0009765625f, abs_tolerance);
+
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E5M2FNUZ>::min().ToFloat(), 0.00003051757f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E5M2FNUZ>::max().ToFloat(), 57344.0f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E5M2FNUZ>::lowest().ToFloat(), -57344.0f, abs_tolerance);
+  EXPECT_NEAR(std::numeric_limits<onnxruntime::Float8E5M2FNUZ>::denorm_min().ToFloat(), 0.00000762939f, abs_tolerance);
+}
+#endif
 
 TEST_F(DataTypeTest, DataUtilsTest) {
   using namespace ONNX_NAMESPACE::Utils;
@@ -666,7 +1021,9 @@ TEST_F(DataTypeTest, DataUtilsTest) {
   }
 }
 
-template<typename T>
+#ifndef DISABLE_ABSEIL
+
+template <typename T>
 using Calc = CalculateInlinedVectorDefaultInlinedElements<T>;
 
 template <typename... Types>
@@ -682,11 +1039,36 @@ struct TypeMinimunInlinedElements {
 };
 
 TEST(InlinedVectorTests, TestDefaultInlinedCapacity) {
-
   // We want to test all the type here
   TypeMinimunInlinedElements<int8_t, int16_t, int32_t, int64_t, std::string> sizes;
   sizes.print(std::cout);
-
 }
+
+#endif  // ! DISABLE_ABSEIL
+
+TEST(TypeLiterals, Tests) {
+  {
+    // uint16_t test
+    MLFloat16 mlfloat = MLFloat16::FromBits(static_cast<uint16_t>(16));
+    auto mlfloat_literal = 16_f16;
+    ASSERT_EQ(mlfloat, mlfloat_literal);
+
+    BFloat16 bfloat{static_cast<uint16_t>(16), BFloat16::FromBits()};
+    auto bfloat_literal = 16_b16;
+    ASSERT_EQ(bfloat, bfloat_literal);
+  }
+
+  {
+    // float
+    MLFloat16 mlfloat{17.0f};
+    auto mlfloat_literal = 17.0_fp16;
+    ASSERT_EQ(mlfloat, mlfloat_literal);
+
+    BFloat16 bfloat{17.0f};
+    auto bfloat_literal = 17.0_bfp16;
+    ASSERT_EQ(bfloat, bfloat_literal);
+  }
+}
+
 }  // namespace test
 }  // namespace onnxruntime

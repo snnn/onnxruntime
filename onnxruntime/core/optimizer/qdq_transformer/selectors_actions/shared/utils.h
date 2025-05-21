@@ -5,14 +5,19 @@
 
 #include <string>
 #include "core/common/common.h"
+#include <gsl/gsl>
+#include "core/common/inlined_containers.h"
+#include "core/framework/node_unit.h"
 #include "core/graph/basic_types.h"
 
 #if !defined(ORT_MINIMAL_BUILD)
-#include "onnx/defs/schema.h"
+#include "core/graph/onnx_protobuf.h"
 #endif
 
 namespace onnxruntime {
-
+namespace logging {
+class Logger;
+}
 class GraphViewer;
 class Node;
 
@@ -45,14 +50,14 @@ class Selectors {
   void RegisterSelector(const OpVersionsAndSelector::OpVersionsMap& ops_and_versions_in,
                         std::unique_ptr<NodeGroupSelector> selector_in);
 
-  const std::unordered_set<std::unique_ptr<OpVersionsAndSelector>>& SelectorsSet() const {
+  const InlinedHashSet<std::unique_ptr<OpVersionsAndSelector>>& SelectorsSet() const {
     return selectors_set_;
   }
 
   ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(Selectors);
 
  private:
-  std::unordered_set<std::unique_ptr<OpVersionsAndSelector>> selectors_set_;
+  InlinedHashSet<std::unique_ptr<OpVersionsAndSelector>> selectors_set_;
 };
 
 // class that manages qdq node group selections
@@ -62,7 +67,7 @@ class SelectorManager {
 
   // Methods that finds and returns a vector of QDQ::NodeGroup in a given graph
   // Can be used in QDQ support in different EPs
-  std::vector<NodeGroup> GetQDQSelections(const GraphViewer& graph_viewer) const;
+  std::vector<NodeGroup> GetQDQSelections(const GraphViewer& graph_viewer, const logging::Logger& logger) const;
 
  private:
   Selectors qdq_selectors_;
@@ -75,6 +80,17 @@ class SelectorManager {
 
   ORT_DISALLOW_COPY_ASSIGNMENT_AND_MOVE(SelectorManager);
 };
+
+// Get all the nodes in the given graph_viewer as NodeUnits (SingleNode or QDQGroup)
+// And return a map to quick query the NodeUnit which contains the given Node,
+// Note, the value of the map is owned by the vector of std::unique_ptr<NodeUnit>
+//
+// TODO: The overall QDQ setup needs refactoring to separate out generic functionality from optimizer specific
+// functionality.
+// We currently have a bit of a mess with generic things like this to get all the node units being in the optimizer
+// library whereas it should be able to be used by an EP with no dependency on optimizers.
+std::pair<std::vector<std::unique_ptr<NodeUnit>>, std::unordered_map<const Node*, const NodeUnit*>>
+GetAllNodeUnits(const GraphViewer& graph_viewer, const logging::Logger& logger);
 
 }  // namespace QDQ
 }  // namespace onnxruntime

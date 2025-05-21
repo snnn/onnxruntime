@@ -1,4 +1,6 @@
-#if defined(__GNUC__)
+#include "onnxruntime_config.h"
+
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic push
 #if __GNUC__ >= 6
 #pragma GCC diagnostic ignored "-Wignored-attributes"
@@ -6,6 +8,15 @@
 #pragma GCC diagnostic ignored "-Wunused-parameter"
 #pragma GCC diagnostic ignored "-Wunused-result"
 #pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+
+// _deps/eigen-src/unsupported/Eigen/CXX11/../../../Eigen/src/Core/arch/NEON/PacketMath.h:1671:9:
+// error: ‘void* memcpy(void*, const void*, size_t)’ copying an object of non-trivial type ‘Eigen::internal::Packet4c’
+//   {aka ‘struct Eigen::internal::eigen_packet_wrapper<int, 2>’} from an array of ‘const int8_t’
+//   {aka ‘const signed char’} [-Werror=class-memaccess]
+#ifdef HAS_CLASS_MEMACCESS
+#pragma GCC diagnostic ignored "-Wclass-memaccess"
+#endif
+
 #elif defined(_MSC_VER)
 // build\windows\debug\external\eigen3\unsupported\eigen\cxx11\src/Tensor/Tensor.h(76):
 // warning C4554: '&': check operator precedence for possible error; use parentheses to clarify precedence
@@ -25,7 +36,7 @@
 #include <unsupported/Eigen/CXX11/ThreadPool>
 #include <unsupported/Eigen/CXX11/Tensor>
 #include <unsupported/Eigen/CXX11/src/Tensor/TensorDeviceThreadPool.h>
-#if defined(__GNUC__)
+#if defined(__GNUC__) && !defined(__clang__)
 #pragma GCC diagnostic pop
 #elif defined(_MSC_VER)
 #pragma warning(pop)

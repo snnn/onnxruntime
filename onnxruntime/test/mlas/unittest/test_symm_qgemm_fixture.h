@@ -7,7 +7,7 @@
 #include "test_symm_qgemm.h"
 
 //
-// Short Execute() test helper to register each test seperately by all parameters.
+// Short Execute() test helper to register each test separately by all parameters.
 //
 template <typename AType, typename OutputType, bool Threaded>
 class SymmQgemmShortExecuteTest;
@@ -66,7 +66,7 @@ class SymmQgemmShortExecuteTest<AType, int32_t, Threaded> : public MlasTestFixtu
       test_registered += RegisterSingleTest(1, 32, b, 1, 0);
       test_registered += RegisterSingleTest(1, b, b, 1, 0);
       test_registered += RegisterSingleTest(1, b, 32, 3, 0);
-      test_registered += RegisterSingleTest(1, 32, b, 5, 0);      
+      test_registered += RegisterSingleTest(1, 32, b, 5, 0);
     }
     test_registered += RegisterSingleTest(43, 500, 401, 7, 113);
     test_registered += RegisterSingleTest(2003, 212, 1020, 3, -5);
@@ -79,4 +79,3 @@ class SymmQgemmShortExecuteTest<AType, int32_t, Threaded> : public MlasTestFixtu
   size_t M_, N_, K_, Batch_;
   int32_t offa_;
 };
-

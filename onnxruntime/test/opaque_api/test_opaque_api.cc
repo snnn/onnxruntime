@@ -175,7 +175,7 @@ std::string CreateModel() {
     auto& input_arg = graph.GetOrCreateNodeArg("Input", &exp_type_proto);
     inputs.push_back(&input_arg);
 
-    //Output is our custom data type. This will return an Opaque type proto
+    // Output is our custom data type. This will return an Opaque type proto
     auto& output_arg = graph.GetOrCreateNodeArg("Output", &exp_type_proto);
     outputs.push_back(&output_arg);
 
@@ -204,14 +204,14 @@ TEST(OpaqueApiTest, RunModelWithOpaqueInputOutput) {
     // Expecting one input
     size_t num_input_nodes = session.GetInputCount();
     EXPECT_EQ(num_input_nodes, 1U);
-    const char* input_name = session.GetInputName(0, allocator);
+    auto input_name = session.GetInputNameAllocated(0, allocator);
 
     size_t num_output_nodes = session.GetOutputCount();
     EXPECT_EQ(num_output_nodes, 1U);
-    const char* output_name = session.GetOutputName(0, allocator);
+    auto output_name = session.GetOutputNameAllocated(0, allocator);
 
-    const char* const input_names[] = {input_name};
-    const char* const output_names[] = {output_name};
+    const char* const input_names[] = {input_name.get()};
+    const char* const output_names[] = {output_name.get()};
 
     // Input
     const std::string input_string{"hi, hello, high, highest"};

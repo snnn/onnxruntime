@@ -40,7 +40,7 @@ ConvGrad: (According to OnnxRuntime discovered using code inspection and Onnx do
 
 Attributes (auto_pad, dilations, group, kernel_shap, pads, and strides) should be the same as the forward pass Conv operator
 
-To acheive Everything specified in the OnnxRuntime ConvGrad we must use both:
+To achieve Everything specified in the OnnxRuntime ConvGrad we must use both:
 1) dnnl::convolution_backward_data - used to calculate (dX) diff_src
 2) dnnl::convolution_backward_weights - used to calculate (dW) diff_weights and (dB) diff_bias
 */
@@ -49,15 +49,15 @@ void DnnlConvGrad::CreatePrimitive(DnnlSubgraphPrimitive& sp, DnnlNode& node) {
 
   auto dy_mem = sp.GetMemory(node.Input(IN_DY));
   auto dy_md = dy_mem.get_desc();
-  auto dy_dims = dy_mem.get_desc().dims();
+  auto dy_dims = dy_mem.get_desc().get_dims();
 
   auto x_mem = sp.GetMemory(node.Input(IN_X));
   auto x_md = x_mem.get_desc();
-  auto x_dims = x_mem.get_desc().dims();
+  auto x_dims = x_mem.get_desc().get_dims();
 
   auto w_mem = sp.GetMemory(node.Input(IN_W));
   auto w_md = w_mem.get_desc();
-  auto w_dims_original = w_mem.get_desc().dims();
+  auto w_dims_original = w_mem.get_desc().get_dims();
   auto w_dims = w_dims_original;
 
   bool dx_required = node.Output(OUT_DX).Exists();
@@ -102,7 +102,6 @@ void DnnlConvGrad::CreatePrimitive(DnnlSubgraphPrimitive& sp, DnnlNode& node) {
     w_md = dnnl::memory::desc({w_dims}, node.Input(IN_W).Type(), format);
   }
 
-
   // dX memory desc is the same as the input X
   dnnl::memory::desc dx_md = x_md;
 
@@ -122,37 +121,37 @@ void DnnlConvGrad::CreatePrimitive(DnnlSubgraphPrimitive& sp, DnnlNode& node) {
   // Reproduce the forward convolution pd.
   dnnl::convolution_forward::primitive_desc conv_forward_pd;
   if (db_required) {
-    auto conv_forward_desc = dnnl::convolution_forward::desc(dnnl::prop_kind::forward_training,
-                                                     dnnl::algorithm::convolution_direct,
-                                                     fwd_x_md, w_md, fwd_b_md, fwd_y_md,
-                                                     strides, dilations, padding_left, padding_right);
-    conv_forward_pd = dnnl::convolution_forward::primitive_desc(conv_forward_desc, dnnl_engine);
+    conv_forward_pd = dnnl::convolution_forward::primitive_desc(dnnl_engine, dnnl::prop_kind::forward_training,
+                                                                dnnl::algorithm::convolution_direct,
+                                                                fwd_x_md, w_md, fwd_b_md, fwd_y_md,
+                                                                strides, dilations, padding_left, padding_right);
   } else {
-    auto conv_forward_desc = dnnl::convolution_forward::desc(dnnl::prop_kind::forward_training,
-                                                     dnnl::algorithm::convolution_direct,
-                                                     fwd_x_md, w_md, fwd_y_md,
-                                                     strides, dilations, padding_left, padding_right);
-    conv_forward_pd = dnnl::convolution_forward::primitive_desc(conv_forward_desc, dnnl_engine);
+    conv_forward_pd = dnnl::convolution_forward::primitive_desc(dnnl_engine, dnnl::prop_kind::forward_training,
+                                                                dnnl::algorithm::convolution_direct,
+                                                                fwd_x_md, w_md, fwd_y_md,
+                                                                strides, dilations, padding_left, padding_right);
   }
 
   // Create the convolution backward data primitive desc
-  auto conv_backward_data_desc = dnnl::convolution_backward_data::desc(dnnl::algorithm::convolution_direct,
-                                                                       dx_md, w_md, dy_md,
-                                                                       strides, dilations, padding_left, padding_right);
-  auto conv_backward_data_pd = dnnl::convolution_backward_data::primitive_desc(conv_backward_data_desc, dnnl_engine, conv_forward_pd);
+  auto conv_backward_data_pd =
+      dnnl::convolution_backward_data::primitive_desc(dnnl_engine, dnnl::algorithm::convolution_direct,
+                                                      dx_md, w_md, dy_md, strides, dilations, padding_left,
+                                                      padding_right, conv_forward_pd);
 
   // Create the convolution backward weights primitve desc
   dnnl::convolution_backward_weights::primitive_desc conv_backward_weights_pd;
   if (db_required) {
-    auto conv_backward_weights_desc = dnnl::convolution_backward_weights::desc(dnnl::algorithm::convolution_direct,
-                                                                               x_md, dw_md, db_md, dy_md,
-                                                                               strides, dilations, padding_left, padding_right);
-  conv_backward_weights_pd = dnnl::convolution_backward_weights::primitive_desc(conv_backward_weights_desc, dnnl_engine, conv_forward_pd);
+    conv_backward_weights_pd =
+        dnnl::convolution_backward_weights::primitive_desc(dnnl_engine, dnnl::algorithm::convolution_direct,
+                                                           x_md, dw_md, db_md, dy_md,
+                                                           strides, dilations, padding_left,
+                                                           padding_right, conv_forward_pd);
   } else {
-    auto conv_backward_weights_desc = dnnl::convolution_backward_weights::desc(dnnl::algorithm::convolution_direct,
-                                                                               x_md, dw_md, dy_md,
-                                                                               strides, dilations, padding_left, padding_right);
-    conv_backward_weights_pd = dnnl::convolution_backward_weights::primitive_desc(conv_backward_weights_desc, dnnl_engine, conv_forward_pd);
+    conv_backward_weights_pd =
+        dnnl::convolution_backward_weights::primitive_desc(dnnl_engine, dnnl::algorithm::convolution_direct,
+                                                           x_md, dw_md, dy_md,
+                                                           strides, dilations, padding_left, padding_right,
+                                                           conv_forward_pd);
   }
 
   // check if memory needs to be moved to GPU
@@ -220,7 +219,6 @@ std::vector<int64_t> DnnlConvGrad::GetPads(DnnlNode& node, ConvShape shape) {
     for (int i = 0; i < attr->second().ints_size(); ++i) {
       pads.push_back(attr->second().ints(i));
     }
-
 
     return dnnl::memory::dims(pads.begin(), pads.end());
   }

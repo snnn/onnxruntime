@@ -284,6 +284,271 @@ MlasQLinearMulKernel(
     }
 }
 
+#elif defined(MLAS_VSX_INTRINSICS)
+
+template<typename DataType, bool IsScalarB>
+static
+void
+MlasQLinearMulKernel(
+    const DataType* InputA,
+    float ScaleA,
+    int32_t ZeroPointA,
+    const DataType* InputB,
+    float ScaleB,
+    int32_t ZeroPointB,
+    float ScaleC,
+    int32_t ZeroPointC,
+    DataType* OutputC,
+    size_t N
+    )
+{
+    const float MinimumValue = (float)((int)std::numeric_limits<DataType>::min() - ZeroPointC);
+    const float MaximumValue = (float)((int)std::numeric_limits<DataType>::max() - ZeroPointC);
+
+    auto ZeroPointAVector = vec_splats(int32_t(ZeroPointA));
+    auto ZeroPointBVector = vec_splats(int32_t(ZeroPointB));
+    auto ZeroPointCVector = vec_splats(float(ZeroPointC));
+
+    auto ScaleAVector = vec_splats(ScaleA);
+    auto ScaleBVector = vec_splats(ScaleB);
+    auto ScaleCVector = vec_splats(ScaleC);
+
+    auto MinimumVector = vec_splats(MinimumValue);
+    auto MaximumVector = vec_splats(MaximumValue);
+
+    float ValueB;
+    __vector float ValueBVector;
+
+    if (IsScalarB) {
+        ValueB = ScaleB * (int32_t(InputB[0]) - ZeroPointB);
+        ValueBVector = vec_splats(ValueB);
+    }
+
+    while (N >= 4) {
+#if defined(_AIX) && defined(__clang__)
+        __vector int IntegerAVector {InputA[0], InputA[1], InputA[2], InputA[3]};
+#else
+        __vector int32_t  IntegerAVector {InputA[0], InputA[1], InputA[2], InputA[3]};
+#endif
+        auto IntegerVector = vec_sub(IntegerAVector, ZeroPointAVector);
+        auto ValueAVector = vec_mul(ScaleAVector, vec_ctf(IntegerVector, 0));
+
+        if (!IsScalarB) {
+#if defined(_AIX) && defined(__clang__)
+            __vector int  IntegerBVector {InputB[0], InputB[1], InputB[2], InputB[3]};
+#else
+            __vector int32_t  IntegerBVector {InputB[0], InputB[1], InputB[2], InputB[3]};
+#endif
+            IntegerVector = vec_sub(IntegerBVector, ZeroPointBVector);
+            ValueBVector = vec_mul(ScaleBVector, vec_ctf(IntegerVector, 0));
+        }
+
+        auto ValueCVector = vec_div(vec_mul(ValueAVector, ValueBVector), ScaleCVector);
+        ValueCVector = vec_min(vec_max(ValueCVector, MinimumVector), MaximumVector);
+        ValueCVector = vec_nearbyint(vec_add(ValueCVector, ZeroPointCVector));
+
+        auto IntegerValueCVector = vec_signed(ValueCVector);
+        OutputC[0] = (DataType) IntegerValueCVector[0];
+        OutputC[1] = (DataType) IntegerValueCVector[1];
+        OutputC[2] = (DataType) IntegerValueCVector[2];
+        OutputC[3] = (DataType) IntegerValueCVector[3];
+
+        OutputC += 4;
+        InputA += 4;
+        InputB += 4;
+
+        N -= 4;
+
+        // Suppress wrong GCC warnings
+        MLAS_UNREFERENCED_PARAMETER(ValueAVector);
+    }
+
+    while (N > 0) {
+        float ValueA = ScaleA * (int32_t(*InputA) - ZeroPointA);
+        if (!IsScalarB) {
+            ValueB = ScaleB * (int32_t(*InputB) - ZeroPointB);
+        }
+        float ValueC = (ValueA * ValueB) / ScaleC;
+        ValueC = std::min(std::max(ValueC, MinimumValue), MaximumValue);
+
+        *OutputC = (DataType)(int32_t)std::nearbyintf(ValueC + ZeroPointC);
+
+        InputA++;
+        InputB++;
+        OutputC++;
+        N--;
+    }
+
+    // Suppress wrong GCC warnings
+    MLAS_UNREFERENCED_PARAMETER(ScaleAVector);
+    MLAS_UNREFERENCED_PARAMETER(ScaleBVector);
+    MLAS_UNREFERENCED_PARAMETER(ValueBVector);
+}
+
+#elif defined(MLAS_LSX_INTRINSICS)
+
+template <class DataType, bool IsLow>
+MLAS_FORCEINLINE
+static
+__m128i
+MlasExtendToS16(
+    __m128i Int8Vector,
+    __m128i ZeroVector
+    );
+
+template <>
+MLAS_FORCEINLINE
+__m128i
+MlasExtendToS16<uint8_t, /* bool IsLow = */ true>(
+    __m128i Int8Vector,
+    __m128i ZeroVector
+    )
+{
+    return __lsx_vilvl_b(ZeroVector, Int8Vector);
+}
+
+template <>
+MLAS_FORCEINLINE
+__m128i
+MlasExtendToS16<uint8_t, /* bool IsLow = */ false>(
+    __m128i Int8Vector,
+    __m128i ZeroVector
+    )
+{
+    return __lsx_vilvh_b(ZeroVector, Int8Vector);
+}
+
+template <>
+MLAS_FORCEINLINE
+__m128i
+MlasExtendToS16<int8_t, /* bool IsLow = */ true>(
+    __m128i Int8Vector,
+    __m128i ZeroVector
+    )
+{
+    MLAS_UNREFERENCED_PARAMETER(ZeroVector);
+    return __lsx_vsrai_h(__lsx_vilvl_b(Int8Vector, Int8Vector), 8);
+}
+
+template <>
+MLAS_FORCEINLINE
+__m128i
+MlasExtendToS16<int8_t, /* bool IsLow = */ false>(
+    __m128i Int8Vector,
+    __m128i ZeroVector
+    )
+{
+    MLAS_UNREFERENCED_PARAMETER(ZeroVector);
+    return __lsx_vsrai_h(__lsx_vilvh_b(Int8Vector, Int8Vector), 8);
+}
+
+template <class DataType, bool IsLow>
+MLAS_FORCEINLINE
+static
+__m128i
+MlasExtendToS16Debias(
+    __m128i Int8Vector,
+    __m128i ZeroVector,
+    __m128i VectorBias
+    )
+{
+    return __lsx_vsub_h(MlasExtendToS16<DataType, IsLow>(Int8Vector, ZeroVector), VectorBias);
+}
+
+MLAS_FORCEINLINE
+static
+__m128i
+MlasQLinearMulVectorS16(
+    __m128i va_s16x8,
+    __m128i vb_s16x8,
+    __m128 VectorScaleRatio,
+    __m128 VectorZeroPointC
+    )
+{
+    __m128i tmp, tmp1;
+
+    const auto ab_lo = __lsx_vmul_h(va_s16x8, vb_s16x8);
+    const auto ab_hi = __lsx_vmuh_h(va_s16x8, vb_s16x8);
+    auto r_lo = __lsx_vilvl_h(ab_hi, ab_lo);
+    auto r_hi = __lsx_vilvh_h(ab_hi, ab_lo);
+    r_lo = __lsx_vftint_w_s(__lsx_vfmadd_s(__lsx_vffint_s_w(r_lo), VectorScaleRatio, VectorZeroPointC));
+    r_hi = __lsx_vftint_w_s(__lsx_vfmadd_s(__lsx_vffint_s_w(r_hi), VectorScaleRatio, VectorZeroPointC));
+
+    tmp = __lsx_vsat_w(r_lo, 15);
+    tmp1 = __lsx_vsat_w(r_hi, 15);
+    return __lsx_vpickev_h(tmp1, tmp);
+}
+
+template<typename DataType, bool IsScalarB>
+static
+void
+MlasQLinearMulKernel(
+    const DataType* InputA,
+    float ScaleA,
+    int32_t ZeroPointA,
+    const DataType* InputB,
+    float ScaleB,
+    int32_t ZeroPointB,
+    float ScaleC,
+    int32_t ZeroPointC,
+    DataType* OutputC,
+    size_t N
+    )
+{
+    const auto VectorZeroPointA = __lsx_vreplgr2vr_h((int16_t)ZeroPointA);
+    const auto VectorZeroPointB = __lsx_vreplgr2vr_h((int16_t)ZeroPointB);
+    const auto VectorZeroPointC = MlasBroadcastFloat32x4((float)ZeroPointC);
+    const auto VectorScaleRatio = MlasBroadcastFloat32x4(ScaleA * ScaleB / ScaleC);
+    const auto ZeroVector = __lsx_vldi(0);
+
+    uint8_t TailDataA[16] = { 0 };
+    uint8_t TailDataB[16] = { 0 };
+    __m128i vb_lo_s16x8, vb_hi_s16x8;
+
+    if (IsScalarB) {
+        vb_lo_s16x8 = __lsx_vsub_h(__lsx_vreplgr2vr_h((int16_t)*InputB), VectorZeroPointB);
+        vb_hi_s16x8 = vb_lo_s16x8;
+    }
+
+    while (N > 0) {
+        if (N < 16) {
+            MlasCopyTailBytes(TailDataA, (const uint8_t*)InputA, N);
+            InputA = (const DataType*)TailDataA;
+            if (!IsScalarB) {
+                MlasCopyTailBytes(TailDataB, (const uint8_t*)InputB, N);
+                InputB = (const DataType*)TailDataB;
+            }
+        }
+
+        const auto va_i8x16 = __lsx_vld((const MLAS_INT32X4*)InputA, 0);
+        InputA += 16;
+        const auto va_lo_s16x8 = MlasExtendToS16Debias<DataType, true>(va_i8x16, ZeroVector, VectorZeroPointA);
+        const auto va_hi_s16x8 = MlasExtendToS16Debias<DataType, false>(va_i8x16, ZeroVector, VectorZeroPointA);
+
+        if (!IsScalarB) {
+            const auto vb_i8x16 = __lsx_vld((const MLAS_INT32X4*)InputB, 0);
+            InputB += 16;
+            vb_lo_s16x8 = MlasExtendToS16Debias<DataType, true>(vb_i8x16, ZeroVector, VectorZeroPointB);
+            vb_hi_s16x8 = MlasExtendToS16Debias<DataType, false>(vb_i8x16, ZeroVector, VectorZeroPointB);
+        }
+
+        const auto vc_lo_s16x8 = MlasQLinearMulVectorS16(va_lo_s16x8, vb_lo_s16x8, VectorScaleRatio, VectorZeroPointC);
+        const auto vc_hi_s16x8 = MlasQLinearMulVectorS16(va_hi_s16x8, vb_hi_s16x8, VectorScaleRatio, VectorZeroPointC);
+        auto vc = MlasPackS16_128<DataType>(vc_lo_s16x8, vc_hi_s16x8);
+
+        if (N >= 16) {
+            __lsx_vst(vc, (__m128i*)OutputC, 0);
+            OutputC += 16;
+            N -= 16;
+        } else {
+            __lsx_vst(vc, (__m128i*)TailDataA, 0);
+            MlasCopyTailBytes((uint8_t*)OutputC, TailDataA, N);
+            N = 0;
+        }
+    }
+}
+
+
 #else
 
 // Pure C++ implementation.

@@ -1,3 +1,29 @@
+##### start trigger Don't edit it manually, Please do edit set-trigger-rules.py ####
+### please do rerun set-trigger-rules.py ###
+trigger:
+  branches:
+    include:
+    - main
+    - rel-*
+  paths:
+    exclude:
+    - docs/**
+    - README.md
+    - CONTRIBUTING.md
+    - BUILD.md
+pr:
+  branches:
+    include:
+    - main
+    - rel-*
+  paths:
+    exclude:
+    - docs/**
+    - README.md
+    - CONTRIBUTING.md
+    - BUILD.md
+#### end trigger ####
+
 parameters:
 - name: NpmPublish
   displayName: 'NPM packages publish configuration'
@@ -10,7 +36,7 @@ parameters:
   default: 'nightly (@dev)'
 
 variables:
-  # pipeline should define the following varaibles
+  # pipeline should define the following variables
   #   ExtraBuildArgs
   #   VersionSuffix
 
@@ -24,72 +50,17 @@ variables:
     NpmPackagingMode: '$(VersionSuffix)'
 
 stages:
-- stage: Extract_commit
-  jobs:
-  - job: Extract_commit
-    pool: 'Win-CPU-2019'
-    timeoutInMinutes: 30
-    workspace:
-      clean: all
-    steps:
-    - checkout: none
-      fetchDepth: 1
-      submodules: false
-    - script: |
-        echo.$(Build.SourceVersion)
-        echo.$(Build.SourceVersion)>$(Build.ArtifactStagingDirectory)\__commit.txt
-    - task: PublishPipelineArtifact@0
-      displayName: 'Publish Pipeline Artifact'
-      inputs:
-        artifactName: '__commit'
-        targetPath: '$(Build.ArtifactStagingDirectory)'
-
-- stage: Build_wasm_Debug
-  dependsOn: Extract_commit
-  jobs:
-  - template: templates/win-wasm-ci.yml
-    parameters:
-      CommitOverride: true
-      BuildConfig: 'Debug'
-      ExtraBuildArgs: '$(ExtraBuildArgs)'
-
-- stage: Build_web_Debug
-  dependsOn: Build_wasm_Debug
-  jobs:
-  - template: templates/win-web-ci.yml
-    parameters:
-      CommitOverride: true
-      BuildConfig: 'Debug'
-      NpmPackagingMode: '$(NpmPackagingMode)'
-
-- stage: Build_wasm_Release
-  dependsOn: Extract_commit
-  jobs:
-  - template: templates/win-wasm-ci.yml
-    parameters:
-      CommitOverride: true
-      BuildConfig: 'Release'
-      ExtraBuildArgs: '--skip_tests --disable_wasm_exception_catching --disable_rtti $(ExtraBuildArgs)'
-
-- stage: Build_web_Release
-  dependsOn: Build_wasm_Release
-  jobs:
-  - template: templates/win-web-ci.yml
-    parameters:
-      CommitOverride: true
-      BuildConfig: 'Release'
-      NpmPackagingMode: '$(NpmPackagingMode)'
-
-- stage: Test_web_BrowserStack
-  dependsOn: Build_wasm_Release
-  jobs:
-  - template: templates/web-browserstack-ci.yml
-    parameters:
-      CommitOverride: true
-
-- stage: Test_web_MultiBrowsers
-  dependsOn: Build_wasm_Release
-  jobs:
-  - template: templates/win-web-multi-browsers.yml
-    parameters:
-      CommitOverride: true
+- template: templates/web-ci.yml
+  parameters:
+    NpmPackagingMode: ${{ variables.NpmPackagingMode }}
+    IsReleasePipeline: false
+    PoolName: 'onnxruntime-Ubuntu2204-AMD-CPU'
+    BuildStaticLib: true
+    ExtraBuildArgs: $(ExtraBuildArgs)
+    WASMTemplate: linux-wasm-ci.yml
+    UseWebPoolName: true
+    RunWebGpuTestsForDebugBuild: false
+    RunWebGpuTestsForReleaseBuild: true
+    WebGpuPoolName: 'onnxruntime-Win2022-VS2022-webgpu-A10'
+    WebCpuPoolName: 'onnxruntime-Win2022-VS2022-webgpu-A10'
+    WithCache: false

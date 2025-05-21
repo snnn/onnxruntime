@@ -1,9 +1,15 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
-#include "core/optimizer/qdq_transformer/selectors_actions/qdq_actions.h"
+#include <unordered_map>
+#include <utility>
 
+#include "core/optimizer/qdq_transformer/selectors_actions/qdq_actions.h"
 #include "core/optimizer/qdq_transformer/qdq_util.h"
+#include "core/optimizer/initializer.h"
+#include "core/graph/node_attr_utils.h"
+#include "core/framework/tensorprotoutils.h"
+#include "core/mlas/inc/mlas_q4.h"
 
 namespace onnxruntime {
 namespace QDQ {
@@ -72,6 +78,36 @@ std::vector<NodeAndMoveInfo> ConvMoves() {
 
   return moves;
 }
+std::vector<NodeAndMoveInfo> WhereMoves() {
+  NTO::NodeLocation dq_x{NTO::NodeType::kInput, 0};
+  NTO::NodeLocation dq_y{NTO::NodeType::kInput, 1};
+  NTO::NodeLocation target{NTO::NodeType::kTarget, 0};
+  NTO::NodeLocation q{NTO::NodeType::kOutput, 0};
+
+  std::vector<NodeAndMoveInfo> moves{
+      MoveAndAppend(target, ArgType::kInput, 0, ArgType::kInput),  // move the condition to the new node
+      MoveAll(dq_x, ArgType::kInput),                              // append all inputs from x
+      MoveAll(dq_y, ArgType::kInput),                              // append all inputs from x
+      MoveAndAppend(q, ArgType::kInput, 1, ArgType::kInput),       // append scale (input 1) from q
+      MoveAndAppend(q, ArgType::kInput, 2, ArgType::kInput),       // append zp (input 2) from q
+      MoveAll(q, ArgType::kOutput)};
+  return moves;
+}
+QDQReplaceWithNew SplitReplacer(bool has_split_as_input) {
+  NTO::NodeLocation dq{NTO::NodeType::kInput, 0};
+  NTO::NodeLocation target{NTO::NodeType::kTarget, 0};
+  NTO::NodeLocation q{NTO::NodeType::kOutput, 0};
+  std::vector<NodeAndMoveInfo> moves{MoveAndAppend(dq, ArgType::kInput, 0, ArgType::kInput)};
+
+  if (has_split_as_input) {
+    // Move the optional split input to the new node.
+    moves.push_back(MoveAndAppend(target, ArgType::kInput, 1, ArgType::kInput, true));
+  }
+
+  moves.push_back(MoveAll(q, ArgType::kOutput));
+
+  return QDQReplaceWithNew(kOnnxDomain, "Split", std::move(moves));
+}
 
 QDQReplaceWithNew MatMulIntToFloatReplacer() {
   NTO::NodeLocation dq1{NTO::NodeType::kInput, 0};
@@ -87,7 +123,7 @@ QDQReplaceWithNew MatMulIntToFloatReplacer() {
       MoveAndAppend(dq2, ArgType::kInput, 2, ArgType::kInput),
       MoveAll(target, ArgType::kOutput)};
 
-  return QDQReplaceWithNew(kMSDomain, std::move(moves), "MatMulIntegerToFloat");
+  return QDQReplaceWithNew(kMSDomain, "MatMulIntegerToFloat", std::move(moves));
 }
 
 struct SetOptionalZeroPoint {
@@ -102,7 +138,7 @@ struct SetOptionalZeroPoint {
     ONNX_NAMESPACE::TensorProto tensor_proto;
     tensor_proto.set_name(name);
     tensor_proto.set_data_type(ONNX_NAMESPACE::TensorProto_DataType_INT8);
-    tensor_proto.set_raw_data(a.data(), sizeof(int8_t));
+    onnxruntime::utils::SetRawDataInTensorProto(tensor_proto, a.data(), sizeof(int8_t));
 
     return tensor_proto;
   };
@@ -115,8 +151,7 @@ struct SetOptionalZeroPoint {
     ONNX_NAMESPACE::TensorProto tensor_proto;
     tensor_proto.set_name(name);
     tensor_proto.set_data_type(ONNX_NAMESPACE::TensorProto_DataType_UINT8);
-    tensor_proto.set_raw_data(a.data(), sizeof(uint8_t));
-
+    onnxruntime::utils::SetRawDataInTensorProto(tensor_proto, a.data(), sizeof(uint8_t));
     return tensor_proto;
   };
   static ONNX_NAMESPACE::TensorProto GetOptionalZeroPointInt8() {
@@ -130,7 +165,7 @@ struct SetOptionalZeroPoint {
 };
 
 void SetOptionalZeroPoint::UpdateNodes(Graph& graph, const NodesToOptimize& selected_nodes) {
-  std::vector<Node*> nodes = selected_nodes.AllNodes();
+  const auto nodes = selected_nodes.AllNodes();
   for (Node* node_ptr : nodes) {
     if (node_ptr == nullptr) {
       continue;
@@ -191,25 +226,45 @@ Status QDQReplaceWithNew::RunForSave(Graph& graph, const NodesToOptimize& select
 }
 #endif  // !defined(ORT_MINIMAL_BUILD)
 
-UnaryReplaceWithQLinear::UnaryReplaceWithQLinear(const std::string& domain)
-    : ReplaceWithQLinear(domain, UnaryMoves()) {
+UnaryReplaceWithQLinear::UnaryReplaceWithQLinear(std::string domain)
+    : ReplaceWithQLinear(std::move(domain), UnaryMoves()) {
 }
 
-BinaryReplaceWithQLinear::BinaryReplaceWithQLinear(const std::string& domain)
-    : ReplaceWithQLinear(domain, BinaryMoves()) {
+NodeAttributes UnaryReplaceWithQLinear::ExtraAttributes(const RuntimeState& state) const {
+  const auto& target = state.selected_nodes.Target();
+  NodeAttributes attr;
+  if (target.OpType() == "Softmax") {
+    attr["opset"] = utils::MakeAttribute(std::string("opset"), int64_t(target.SinceVersion()));
+  }
+  return attr;
 }
 
-VariadicReplaceWithQLinear::VariadicReplaceWithQLinear(const std::string& domain)
-    : ReplaceWithQLinear(domain, VariadicMoves()) {
+BinaryReplaceWithQLinear::BinaryReplaceWithQLinear(std::string domain)
+    : ReplaceWithQLinear(std::move(domain), BinaryMoves()) {
+}
+
+VariadicReplaceWithQLinear::VariadicReplaceWithQLinear(std::string domain)
+    : ReplaceWithQLinear(std::move(domain), VariadicMoves()) {
 }
 
 ConvReplaceWithQLinear::ConvReplaceWithQLinear()
     : ReplaceWithQLinear(kOnnxDomain, ConvMoves()) {
 }
-
+WhereReplaceWithQLinear::WhereReplaceWithQLinear()
+    : ReplaceWithQLinear(kMSDomain, WhereMoves()) {
+}
 MatMulReplaceWithQLinear::MatMulReplaceWithQLinear()
     : matmul_int_to_float_replacer_{MatMulIntToFloatReplacer()},
       qlinear_matmul_replacer_{kOnnxDomain} {
+}
+
+Status SplitReplaceWithQuant::Run(Graph& graph, const NodesToOptimize& selected_nodes) const {
+  const auto& target_node = selected_nodes.Target();
+  const auto& input_defs = target_node.InputDefs();
+
+  // The 'split' attribute became an optional input at opset 13.
+  bool has_split_as_input = target_node.SinceVersion() >= 13 && input_defs.size() == 2;
+  return SplitReplacer(has_split_as_input).Run(graph, selected_nodes);
 }
 
 Status MatMulReplaceWithQLinear::Run(Graph& graph, const NodesToOptimize& selected_nodes) const {
@@ -221,6 +276,205 @@ Status MatMulReplaceWithQLinear::Run(Graph& graph, const NodesToOptimize& select
   } else {
     return qlinear_matmul_replacer_.Run(graph, selected_nodes);
   }
+}
+
+DQMatMulToMatMulNBitsAction::DQMatMulToMatMulNBitsAction(
+    int64_t accuracy_level,
+    concurrency::ThreadPool* intra_op_thread_pool,
+    std::unordered_map<std::string, std::unique_ptr<Tensor>>* p_buffered_tensors)
+    : accuracy_level_{accuracy_level},
+      domain_{kMSDomain},
+      op_type_{"MatMulNBits"},
+      value_moves_{[]() {
+        NTO::NodeLocation target{NTO::NodeType::kTarget, 0};
+        return std::vector<NodeAndMoveInfo>{
+            MoveAndAppend(target, ArgType::kInput, 0, ArgType::kInput),
+            MoveAll(target, ArgType::kOutput)};
+      }()},
+      intra_op_thread_pool_{intra_op_thread_pool},
+      p_buffered_tensors_{p_buffered_tensors} {
+  ORT_ENFORCE(accuracy_level_ >= 0 && accuracy_level_ <= 4, "MatMulNBits accuracy level must be between 0 and 4");
+}
+
+NodeAttributes
+DQMatMulToMatMulNBitsAction::ExtraAttributes(const RuntimeState& runtime_state) const {
+  NodeAttributes extra_attributes;
+
+  const auto* dq_node = runtime_state.selected_nodes.Input(0);
+  auto& attrs = dq_node->GetAttributes();
+  const auto* weight_shape = dq_node->InputDefs()[0]->Shape();
+
+  utils::SetNodeAttribute(utils::MakeAttribute("K", weight_shape->dim(0).dim_value()), extra_attributes);
+  utils::SetNodeAttribute(utils::MakeAttribute("N", weight_shape->dim(1).dim_value()), extra_attributes);
+  utils::SetNodeAttribute(utils::MakeAttribute("accuracy_level", accuracy_level_), extra_attributes);
+  // currently only 4bits is supported. In the future, derive bits from DQ's weight type.
+  utils::SetNodeAttribute(utils::MakeAttribute("bits", static_cast<int64_t>(4)), extra_attributes);
+  utils::SetNodeAttribute(utils::MakeAttribute("block_size", attrs.at("block_size").i()), extra_attributes);
+
+  return extra_attributes;
+}
+
+Status DQMatMulToMatMulNBitsAction::ProcessNewNode(Graph& graph,
+                                                   const NodesToOptimize& selected_nodes,
+                                                   Node& replacement_node) const {
+  ORT_RETURN_IF_NOT(p_buffered_tensors_, "Buffered tensors map cannot be null");
+  const auto* dq_node = selected_nodes.Input(0);
+  const auto* weight_arg = dq_node->InputDefs()[0];
+  const auto* scale_arg = dq_node->InputDefs()[1];
+  const auto* zp_arg = dq_node->InputDefs().size() > 2 ? dq_node->InputDefs()[2] : nullptr;
+  const auto& attrs = dq_node->GetAttributes();
+
+  const ONNX_NAMESPACE::TensorProto* weight_tensor_proto = nullptr;
+  const ONNX_NAMESPACE::TensorProto* scale_tensor_proto = nullptr;
+  const ONNX_NAMESPACE::TensorProto* zp_tensor_proto = nullptr;
+  graph.GetInitializedTensor(weight_arg->Name(), weight_tensor_proto);
+  graph.GetInitializedTensor(scale_arg->Name(), scale_tensor_proto);
+  if (zp_arg) {
+    graph.GetInitializedTensor(zp_arg->Name(), zp_tensor_proto);
+  }
+
+  auto K = weight_arg->Shape()->dim(0).dim_value();
+  auto N = weight_arg->Shape()->dim(1).dim_value();
+  auto block_size = attrs.at("block_size").i();
+  auto quant_num = (K + block_size - 1) / block_size;
+  auto blob_bytes = (block_size + 1) / 2;
+
+  // Unfortunately iterating the source data is complicated, the data maybe in
+  // external file, a raw buffer, or a repeated field depending on the data
+  // type.  UnpackTensor() already contains some of these logic and is closest
+  // to what we need. But it does not handle external data.
+  Initializer weight_src(*weight_tensor_proto, graph.ModelPath());
+  Initializer scale_src(*scale_tensor_proto, graph.ModelPath());
+  auto uint8_type = DataTypeImpl::TensorTypeFromONNXEnum(ONNX_NAMESPACE::TensorProto_DataType_UINT8)->GetElementType();
+  auto scale_type = DataTypeImpl::TensorTypeFromONNXEnum(scale_src.data_type())->GetElementType();
+  std::optional<Initializer> zp_src_ptr;
+  auto cpu_allocator = std::make_shared<CPUAllocator>();
+  auto weight_dst_name = graph.GenerateNodeArgName(weight_arg->Name() + "_T");
+  auto weight_dst_ptr = std::make_unique<Tensor>(uint8_type,
+                                                 TensorShape{N, quant_num, blob_bytes},
+                                                 cpu_allocator);
+  auto scale_dst_name = graph.GenerateNodeArgName(scale_arg->Name() + "_T");
+  auto scale_size = (TensorShape{N, quant_num}).Size();
+  auto scale_dst_ptr = std::make_unique<Tensor>(scale_type,
+                                                TensorShape{scale_size},
+                                                cpu_allocator);
+  std::string zp_dst_name;
+  std::unique_ptr<Tensor> zp_dst_ptr;
+  auto zp_size = (TensorShape{N, (quant_num + 1) / 2}).Size();
+
+  if (zp_tensor_proto) {
+    zp_src_ptr.emplace(*zp_tensor_proto, graph.ModelPath());
+    zp_dst_name = graph.GenerateNodeArgName(zp_arg->Name() + "_T");
+    zp_dst_ptr = std::make_unique<Tensor>(uint8_type,
+                                          TensorShape{zp_size},
+                                          cpu_allocator);
+  } else if (weight_src.data_type() == ONNX_NAMESPACE::TensorProto_DataType_UINT4) {
+    zp_dst_name = graph.GenerateNodeArgName("fused_DQ_MatMul_zero_point_T");
+    zp_dst_ptr = std::make_unique<Tensor>(uint8_type,
+                                          TensorShape{zp_size},
+                                          cpu_allocator);
+    memset(zp_dst_ptr->MutableDataRaw(), 0, zp_dst_ptr->SizeInBytes());
+  }
+
+  if (scale_src.data_type() == ONNX_NAMESPACE::TensorProto_DataType_FLOAT) {
+    if (weight_src.data_type() == ONNX_NAMESPACE::TensorProto_DataType_INT4) {
+      MlasQDQTransposeBlockwiseQuantized<float, 4, true>(
+          weight_src.DataAsByteSpan().data(),
+          scale_src.data<float>(),
+          zp_src_ptr ? zp_src_ptr->DataAsByteSpan().data() : nullptr,
+          weight_dst_ptr->MutableData<uint8_t>(),
+          scale_dst_ptr->MutableData<float>(),
+          zp_dst_ptr ? zp_dst_ptr->MutableData<uint8_t>() : nullptr,
+          true,
+          static_cast<int>(K),
+          static_cast<int>(N),
+          static_cast<int>(block_size),
+          intra_op_thread_pool_);
+    } else {
+      MlasQDQTransposeBlockwiseQuantized<float, 4, false>(
+          weight_src.DataAsByteSpan().data(),
+          scale_src.data<float>(),
+          zp_src_ptr ? zp_src_ptr->DataAsByteSpan().data() : nullptr,
+          weight_dst_ptr->MutableData<uint8_t>(),
+          scale_dst_ptr->MutableData<float>(),
+          zp_dst_ptr ? zp_dst_ptr->MutableData<uint8_t>() : nullptr,
+          true,
+          static_cast<int>(K),
+          static_cast<int>(N),
+          static_cast<int>(block_size),
+          intra_op_thread_pool_);
+    }
+  } else {
+    if (weight_src.data_type() == ONNX_NAMESPACE::TensorProto_DataType_INT4) {
+      MlasQDQTransposeBlockwiseQuantized<MLFloat16, 4, true>(
+          weight_src.DataAsByteSpan().data(),
+          scale_src.data<MLFloat16>(),
+          zp_src_ptr ? zp_src_ptr->DataAsByteSpan().data() : nullptr,
+          weight_dst_ptr->MutableData<uint8_t>(),
+          scale_dst_ptr->MutableData<MLFloat16>(),
+          zp_dst_ptr ? zp_dst_ptr->MutableData<uint8_t>() : nullptr,
+          true,
+          static_cast<int>(K),
+          static_cast<int>(N),
+          static_cast<int>(block_size),
+          intra_op_thread_pool_);
+
+    } else {
+      MlasQDQTransposeBlockwiseQuantized<MLFloat16, 4, false>(
+          weight_src.DataAsByteSpan().data(),
+          scale_src.data<MLFloat16>(),
+          zp_src_ptr ? zp_src_ptr->DataAsByteSpan().data() : nullptr,
+          weight_dst_ptr->MutableData<uint8_t>(),
+          scale_dst_ptr->MutableData<MLFloat16>(),
+          zp_dst_ptr ? zp_dst_ptr->MutableData<uint8_t>() : nullptr,
+          true,
+          static_cast<int>(K),
+          static_cast<int>(N),
+          static_cast<int>(block_size),
+          intra_op_thread_pool_);
+    }
+  }
+
+  auto weight_T_tp = utils::TensorToTensorProto(*weight_dst_ptr, weight_dst_name, true);
+  auto scale_T_tp = utils::TensorToTensorProto(*scale_dst_ptr, scale_dst_name, true);
+  std::optional<ONNX_NAMESPACE::TensorProto> zp_T_tp;
+
+  if (zp_dst_ptr) {
+    zp_T_tp.emplace(utils::TensorToTensorProto(*zp_dst_ptr, zp_dst_name, true));
+  }
+
+  auto& input_defs = replacement_node.MutableInputDefs();
+  input_defs.push_back(&graph_utils::AddInitializer(graph, weight_T_tp));
+  replacement_node.MutableInputArgsCount().push_back(1);
+  if (weight_T_tp.data_location() == ONNX_NAMESPACE::TensorProto_DataLocation_EXTERNAL) {
+    // If tensor is too small, tensor proto directly copies data from tensor. The tensor allocated
+    // here can be directly destructed.
+    // Only keep the tensor in p_buffered_tensors_ when the tensor proto is using external data location
+    // and pointing the location to tensor's buffer.
+    ORT_RETURN_IF_NOT(p_buffered_tensors_->emplace(weight_dst_name, std::move(weight_dst_ptr)).second,
+                      "Failed to add buffered tensor ",
+                      weight_dst_name);
+  }
+
+  input_defs.push_back(&graph_utils::AddInitializer(graph, scale_T_tp));
+  replacement_node.MutableInputArgsCount().push_back(1);
+  if (scale_T_tp.data_location() == ONNX_NAMESPACE::TensorProto_DataLocation_EXTERNAL) {
+    ORT_RETURN_IF_NOT(p_buffered_tensors_->emplace(scale_dst_name, std::move(scale_dst_ptr)).second,
+                      "Failed to add buffered tensor ",
+                      scale_dst_name);
+  }
+
+  if (zp_T_tp) {
+    input_defs.push_back(&graph_utils::AddInitializer(graph, zp_T_tp.value()));
+    replacement_node.MutableInputArgsCount().push_back(1);
+    if (zp_T_tp->data_location() == ONNX_NAMESPACE::TensorProto_DataLocation_EXTERNAL) {
+      ORT_RETURN_IF_NOT(p_buffered_tensors_->emplace(zp_dst_name, std::move(zp_dst_ptr)).second,
+                        "Failed to add buffered tensor ",
+                        zp_dst_name);
+    }
+  }
+
+  return Status::OK();
 }
 
 static std::vector<NodeAndMoveInfo> GetGemmMoveInfo(bool does_q_node_exist) {
@@ -247,8 +501,8 @@ static std::vector<NodeAndMoveInfo> GetGemmMoveInfo(bool does_q_node_exist) {
 }
 
 GemmReplaceWithQuant::GemmReplaceWithQuant()
-    : qgemm_with_float_as_output_replacer_(kMSDomain, GetGemmMoveInfo(false), "QGemm"),
-      qgemm_with_8bits_as_output_replacer_(kMSDomain, GetGemmMoveInfo(true), "QGemm") {
+    : qgemm_with_float_as_output_replacer_(kMSDomain, "QGemm", GetGemmMoveInfo(false)),
+      qgemm_with_8bits_as_output_replacer_(kMSDomain, "QGemm", GetGemmMoveInfo(true)) {
 }
 
 Status GemmReplaceWithQuant::Run(Graph& graph, const NodesToOptimize& selected_nodes) const {

@@ -6,14 +6,14 @@
 
 namespace onnxruntime {
 
-AllocatorPtr ITensorAllocator::GetAllocator(const OrtMemoryInfo& memory_info) {
-  return session_state_.GetAllocator(memory_info);
+AllocatorPtr ITensorAllocator::GetAllocator(const OrtDevice& device) {
+  return session_state_.GetAllocator(device);
 }
 
 std::unique_ptr<ITensorAllocator> ITensorAllocator::Create(bool enable_mem_pattern,
                                                            const ExecutionPlanBase& execution_plan,
                                                            const SessionState& session_state,
-                                                           std::vector<BufferUniquePtr>& weights_buffers) {
+                                                           InlinedVector<BufferUniquePtr>& weights_buffers) {
   if (enable_mem_pattern) {
     return std::make_unique<TensorAllocatorWithMemPattern>(execution_plan, session_state, weights_buffers);
   } else {

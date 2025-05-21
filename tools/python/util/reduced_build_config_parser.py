@@ -1,19 +1,21 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
+from __future__ import annotations
 
 import os
 
 # Check if the flatbuffers module is available. If not we cannot handle type reduction information in the config.
 try:
-    import flatbuffers  # noqa
+    import flatbuffers  # noqa: F401
+
     have_flatbuffers = True
-    from .ort_format_model import GloballyAllowedTypesOpTypeImplFilter, OperatorTypeUsageManager  # noqa
+    from .ort_format_model import GloballyAllowedTypesOpTypeImplFilter, OperatorTypeUsageManager
 except ImportError:
     have_flatbuffers = False
 
 
 def parse_config(config_file: str, enable_type_reduction: bool = False):
-    '''
+    """
     Parse the configuration file and return the required operators dictionary and an
     OpTypeImplFilterInterface instance.
 
@@ -78,10 +80,10 @@ def parse_config(config_file: str, enable_type_reduction: bool = False):
                            required.
              op_type_impl_filter: OpTypeImplFilterInterface instance if type reduction is enabled, the flatbuffers
                                   module is available, and type reduction information is present. None otherwise.
-    '''
+    """
 
     if not os.path.isfile(config_file):
-        raise ValueError('Configuration file {} does not exist'.format(config_file))
+        raise ValueError(f"Configuration file {config_file} does not exist")
 
     # only enable type reduction when flatbuffers is available
     enable_type_reduction = enable_type_reduction and have_flatbuffers
@@ -101,7 +103,7 @@ def parse_config(config_file: str, enable_type_reduction: bool = False):
                 nonlocal globally_allowed_types
                 if globally_allowed_types is not None:
                     raise RuntimeError("Globally allowed types were already specified.")
-                globally_allowed_types = set(segment.strip() for segment in line.split(';')[1].split(','))
+                globally_allowed_types = {segment.strip() for segment in line.split(";")[1].split(",")}
             return True
 
         if line == "!no_ops_specified_means_all_ops_are_required":  # handle all ops required line
@@ -111,17 +113,17 @@ def parse_config(config_file: str, enable_type_reduction: bool = False):
 
         return False
 
-    with open(config_file, 'r') as config:
-        for line in [orig_line.strip() for orig_line in config.readlines()]:
+    with open(config_file) as config:
+        for line in [orig_line.strip() for orig_line in config]:
             if process_non_op_line(line):
                 continue
 
-            domain, opset_str, operators_str = [segment.strip() for segment in line.split(';')]
-            opsets = [int(s) for s in opset_str.split(',')]
+            domain, opset_str, operators_str = (segment.strip() for segment in line.split(";"))
+            opsets = [int(s) for s in opset_str.split(",")]
 
             # any type reduction information is serialized json that starts/ends with { and }.
             # type info is optional for each operator.
-            if '{' in operators_str:
+            if "{" in operators_str:
                 has_op_type_reduction_info = True
 
                 # parse the entries in the json dictionary with type info
@@ -129,8 +131,8 @@ def parse_config(config_file: str, enable_type_reduction: bool = False):
                 cur = 0
                 end = len(operators_str)
                 while cur < end:
-                    next_comma = operators_str.find(',', cur)
-                    next_open_brace = operators_str.find('{', cur)
+                    next_comma = operators_str.find(",", cur)
+                    next_open_brace = operators_str.find("{", cur)
 
                     if next_comma == -1:
                         next_comma = end
@@ -150,14 +152,14 @@ def parse_config(config_file: str, enable_type_reduction: bool = False):
                         i = next_open_brace + 1
                         num_open_braces = 1
                         while num_open_braces > 0 and i < end:
-                            if operators_str[i] == '{':
+                            if operators_str[i] == "{":
                                 num_open_braces += 1
-                            elif operators_str[i] == '}':
+                            elif operators_str[i] == "}":
                                 num_open_braces -= 1
                             i += 1
 
                         if num_open_braces != 0:
-                            raise RuntimeError('Mismatched { and } in type string: ' + operators_str[next_open_brace:])
+                            raise RuntimeError("Mismatched { and } in type string: " + operators_str[next_open_brace:])
 
                         if op_type_usage_manager:
                             type_str = operators_str[next_open_brace:i]
@@ -171,7 +173,7 @@ def parse_config(config_file: str, enable_type_reduction: bool = False):
                         cur = end_str + 1
 
             else:
-                operators = set([op.strip() for op in operators_str.split(',')])
+                operators = {op.strip() for op in operators_str.split(",")}
 
             for opset in opsets:
                 if domain not in required_ops:
@@ -190,7 +192,8 @@ def parse_config(config_file: str, enable_type_reduction: bool = False):
             op_type_usage_manager = None
         if globally_allowed_types is not None and op_type_usage_manager is not None:
             raise RuntimeError(
-                "Specifying globally allowed types and per-op type reduction info together is unsupported.")
+                "Specifying globally allowed types and per-op type reduction info together is unsupported."
+            )
 
         if globally_allowed_types is not None:
             op_type_impl_filter = GloballyAllowedTypesOpTypeImplFilter(globally_allowed_types)

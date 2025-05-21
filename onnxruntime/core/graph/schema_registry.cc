@@ -10,7 +10,7 @@ common::Status OnnxRuntimeOpSchemaRegistry::SetBaselineAndOpsetVersionForDomain(
     const std::string& domain,
     int baseline_opset_version,
     int opset_version) {
-  std::lock_guard<OrtMutex> lock(mutex_);
+  std::lock_guard<std::mutex> lock(mutex_);
 
   auto it = domain_version_range_map_.find(domain);
   if (domain_version_range_map_.end() != it) {
@@ -161,7 +161,8 @@ void SchemaRegistryManager::RegisterRegistry(std::shared_ptr<IOnnxRuntimeOpSchem
   registries.push_front(registry);
 }
 
-void SchemaRegistryManager::GetDomainToVersionMapForRegistries(DomainToVersionMap& domain_version_map, bool is_onnx_only) const {
+void SchemaRegistryManager::GetDomainToVersionMapForRegistries(DomainToVersionMap& domain_version_map,
+                                                               bool is_onnx_only) const {
   // Build the map using each of the registries
   for (auto& registry : registries) {
     DomainToVersionMap latest_opset_versions_in_reg = registry->GetLatestOpsetVersions(is_onnx_only);
@@ -282,8 +283,17 @@ void SchemaRegistryManager::GetSchemaAndHistory(
     checked_registry_indices.push_back(index);
   }
 
+  // reset the version to the input op_set_version in case there was an unchecked registry using the same domain.
+  // we have no control over the opset values in those registries and the version values aren't guaranteed to
+  // match the real ONNX ones.
+  // e.g. a user can add a custom registry that uses the ONNX domain. the custom op infrastructure would
+  //      create the custom registry with an opset range of 1 to 1000. the above loop that processes the unchecked
+  //      registry would find the opset range of 1 to 1000 and set `new_version` to 1, which would result in `version`
+  //      being set to 1. that would override the op_set_version value provided and result in us only ever looking for
+  //      opset 1 schemas if we fall through to here to find an ONNX operator's schema.
+  version = op_set_version;
+
   // Reject versions greater than what is actually supported.
-  *latest_schema = nullptr;
   if (!IsDomainVersionBeyondSupportedRange(domain, version)) {
     // if not found in registered custom schema registry, search in ONNX schema registry
     *latest_schema = ONNX_NAMESPACE::OpSchemaRegistry::Schema(key, version, domain);

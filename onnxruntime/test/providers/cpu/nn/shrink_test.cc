@@ -68,7 +68,8 @@ std::vector<ShrinkTestData<T>> GenerateUnsignedTestCases() {
 }
 
 template <typename T>
-void RunShrinkTest(const std::vector<ShrinkTestData<T>>& test_cases) {
+void RunShrinkTest(const std::vector<ShrinkTestData<T>>& test_cases,
+                   const std::unordered_set<std::string>& excluded_provider_types = {}) {
   for (const auto& test_data : test_cases) {
     OpTester test("Shrink", 9);
 
@@ -82,21 +83,21 @@ void RunShrinkTest(const std::vector<ShrinkTestData<T>>& test_cases) {
 
     test.AddInput<T>("X", test_data.input_dimensions, test_data.input_vals);
     test.AddOutput<T>("Y", test_data.expected_dimensions, test_data.expected_vals);
-    test.Run();
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", excluded_provider_types);
   }
 }
 
 const std::vector<MLFloat16> ConvertFloatToMLFloat16(const std::vector<float>& float_data) {
   std::vector<MLFloat16> new_data;
   for (const auto& f : float_data) {
-    new_data.push_back(MLFloat16(math::floatToHalf(f)));
+    new_data.push_back(MLFloat16(f));
   }
   return new_data;
 }
 
 TEST(MathOpTest, ShrinkInt8Type) {
   const auto& test_cases = GenerateSignedTestCases<int8_t>();
-  RunShrinkTest<int8_t>(test_cases);
+  RunShrinkTest<int8_t>(test_cases, {kTensorrtExecutionProvider});  // For TensorRT running in these in INT8 quantization scales are needed, so skip it now
 }
 
 TEST(MathOpTest, ShrinkUint8Type) {
@@ -167,7 +168,7 @@ TEST(MathOpTest, ShrinkMLFloat16Type) {
        {2, 2},
        output_test_data_nondefault,
        {2, 2}});
-  RunShrinkTest<MLFloat16>(test_cases);
+  RunShrinkTest<MLFloat16>(test_cases, {kTensorrtExecutionProvider});
 }
 
 }  // namespace test

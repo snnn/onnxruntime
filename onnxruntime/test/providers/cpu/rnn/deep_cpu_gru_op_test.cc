@@ -8,11 +8,12 @@
 
 #include "core/providers/cpu/rnn/deep_cpu_gru.h"
 #include "test/providers/provider_test_utils.h"
+#include "test/util/include/default_providers.h"
 using namespace std;
 namespace onnxruntime {
 namespace test {
 
-static const std::vector<string> default_activations = {"sigmoid", "tanh"};
+static const std::vector<string> default_activations = {"Sigmoid", "Tanh"};
 
 static void RunGruTest(const std::vector<float>& X_data,
                        const std::vector<float>& W_data,
@@ -97,8 +98,12 @@ static void RunGruTest(const std::vector<float>& X_data,
     test.AddOptionalOutputEdge<float>();
   }
 
-  // TensorRT failed on GRU tests
+// TensorRT, OpenVINO failed on GRU tests
+#if defined(USE_OPENVINO)
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kOpenVINOExecutionProvider});
+#else
   test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+#endif
 }
 
 void DefaultActivationsSimpleWeightsNoBias(std::string direction,
@@ -349,8 +354,8 @@ TEST(GRUTest, ReverseDefaultActivationsSimpleWeightsWithBiasLinearBeforeReset) {
 }
 
 /*******************
-* Legacy tests from LotusRT
-*/
+ * Legacy tests from LotusRT
+ */
 class DeepCpuGruOpTestContext {
  public:
   DeepCpuGruOpTestContext(std::string direction,
@@ -507,7 +512,7 @@ void DeepCpuGruOpTestContext::RunTest(const std::vector<float>& X,
                                       const std::vector<float>& expected_Y,
                                       const std::vector<float>& expected_Y_h,
                                       const bool linear_before_reset) {
-  //run with and without output_sequence
+  // run with and without output_sequence
   RunGruTest(X, gru_input_weights_, gru_recurrent_weights_,
              expected_Y, expected_Y_h,
              input_size_, batch_size, hidden_dim_, seq_length,
@@ -539,7 +544,7 @@ void DeepCpuGruOpTestContext::RunTest(const std::vector<float>& X,
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpForwardBasic) {
   const std::string direction = "forward";
-  const std::vector<std::string> activations = {"sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -557,7 +562,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpForwardBasic) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpBackwardBasic) {
   const std::string direction = "reverse";
-  const std::vector<std::string> activations = {"sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -576,7 +581,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpBackwardBasic) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpBidirectionalBasic) {
   const std::string direction = "bidirectional";
-  const std::vector<std::string> activations = {"sigmoid", "tanh", "sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh", "Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -599,7 +604,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpBidirectionalBasic) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpForwardActivation) {
   const std::string direction = "forward";
-  const std::vector<std::string> activations = {"tanh", "sigmoid"};
+  const std::vector<std::string> activations = {"Tanh", "Sigmoid"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -618,7 +623,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpForwardActivation) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpForwardInitialHiddenState) {
   const std::string direction = "forward";
-  const std::vector<std::string> activations = {"sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -637,7 +642,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpForwardInitialHiddenState) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpForwardBatch) {
   const std::string direction = "forward";
-  const std::vector<std::string> activations = {"sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -664,7 +669,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpForwardBatch) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpForwardBatchLinearBeforeReset) {
   const std::string direction = "forward";
-  const std::vector<std::string> activations = {"sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -691,7 +696,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpForwardBatchLinearBeforeReset) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpGrowBatchSequenceLength) {
   const std::string direction = "forward";
-  const std::vector<std::string> activations = {"sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -731,7 +736,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpGrowBatchSequenceLength) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpGrowBatchSequenceLengthLinearBeforeReset) {
   const std::string direction = "forward";
-  const std::vector<std::string> activations = {"sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -771,7 +776,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpGrowBatchSequenceLengthLinearBeforeReset) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthWithBidirectionalLinearBeforeResetB1) {
   const std::string direction = "bidirectional";
-  const std::vector<std::string> activations = {"sigmoid", "tanh", "sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh", "Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -792,7 +797,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthWithBidirectionalLinearBeforeRe
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthWithBidirectionalLinearBeforeResetB2) {
   const std::string direction = "bidirectional";
-  const std::vector<std::string> activations = {"sigmoid", "tanh", "sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh", "Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -812,7 +817,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthWithBidirectionalLinearBeforeRe
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthWithBidirectionalLinearBeforeReset) {
   const std::string direction = "bidirectional";
-  const std::vector<std::string> activations = {"sigmoid", "tanh", "sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh", "Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -840,7 +845,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthWithBidirectionalLinearBeforeRe
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpShorterSeqInMiddle) {
   const std::string direction = "bidirectional";
-  const std::vector<std::string> activations = {"sigmoid", "tanh", "sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh", "Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -873,7 +878,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpShorterSeqInMiddle) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpZeroSeqInMiddle) {
   const std::string direction = "bidirectional";
-  const std::vector<std::string> activations = {"sigmoid", "tanh", "sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh", "Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -906,7 +911,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpZeroSeqInMiddle) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthWithPartialZero) {
   const std::string direction = "bidirectional";
-  const std::vector<std::string> activations = {"sigmoid", "tanh", "sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh", "Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -934,7 +939,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthWithPartialZero) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthShorterThanInputSequenceLength) {
   const std::string direction = "bidirectional";
-  const std::vector<std::string> activations = {"sigmoid", "tanh", "sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh", "Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -963,7 +968,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthShorterThanInputSequenceLength)
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthAllZeros) {
   const std::string direction = "forward";
-  const std::vector<std::string> activations = {"sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations);
 
@@ -991,7 +996,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpSequenceLengthAllZeros) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUOpSingleBatchMultipleHiddenThreads) {
   const std::string direction = "forward";
-  const std::vector<std::string> activations = {"sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations, true, {}, {}, /*large_hidden*/ true);
 
@@ -1021,7 +1026,7 @@ TEST(GRUTest, ONNXRuntime_TestGRUOpSingleBatchMultipleHiddenThreads) {
 
 TEST(GRUTest, ONNXRuntime_TestGRUPositiveActivationClipping) {
   const std::string direction = "forward";
-  const std::vector<std::string> activations = {"sigmoid", "tanh"};
+  const std::vector<std::string> activations = {"Sigmoid", "Tanh"};
 
   DeepCpuGruOpTestContext ctx(direction, activations, true, {}, {}, /*large_hidden*/ true);
 

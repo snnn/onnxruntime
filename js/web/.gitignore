@@ -15,8 +15,7 @@ test/**/*.js.map
 script/**/*.js
 script/**/*.js.map
 
-lib/wasm/binding/**/*.wasm
-!lib/wasm/binding/**/*.d.ts
+!/types.d.ts
 
 test/testdata-config.json
-test/data/node/
+test/data/node

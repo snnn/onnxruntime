@@ -15,7 +15,7 @@ public:
     {
         const uint32_t inputCount = kernelInfo.GetInputCount();
         ML_CHECK_VALID_ARGUMENT((opsetVersion >= 2 && opsetVersion < 11 && inputCount == 1)
-                             || (opsetVersion >= 11 && inputCount >= 2 && inputCount <= 3));
+                             || (opsetVersion >= 11 && inputCount >= 2 && inputCount <= 4));
         ML_CHECK_VALID_ARGUMENT(kernelInfo.GetOutputCount() == 1);
 
         std::vector<std::optional<uint32_t>> kernelInputIndices = { 0 }; // Only bind GPU to first 'data' tensor.
@@ -51,6 +51,12 @@ public:
         {
             mode = DML_PADDING_MODE_REFLECTION;
         }
+#if DML_TARGET_VERSION >= 0x6400
+        else if (modeString == AttrValue::Wrap)
+        {
+            mode = DML_PADDING_MODE_WRAP;
+        }
+#endif
         else
         {
             ML_INVALID_ARGUMENT("Unknown Pad mode attribute.");
@@ -68,12 +74,12 @@ public:
         paddingDesc.EndPadding = m_endPadding.data();
         // PaddingValueDataType will always be equal to inputDataTensorDataType
         // Assigning paddingValueDataType to inputDataTensorDataType because this field
-        // has to be assigned even if program does not go through below conditional 
+        // has to be assigned even if program does not go through below conditional
         // logic for some corner test case (like opsetVersion >= 11, but no validInput at index 2)
         // Same applies to paddingValue.
         paddingDesc.PaddingValueDataType = this->m_inputTensorDescs[0].GetDmlDataType();
         CastToClampedScalarUnion<float>(paddingDesc.PaddingValueDataType, 0.0f, /*out*/&paddingDesc.PaddingValue);
-        
+
         // Read the constant value which can come from an attribute or tensor.
         if (opsetVersion >= 11)
         {
@@ -95,8 +101,28 @@ public:
     }
 };
 
+void CALLBACK QueryPad(IMLOperatorSupportQueryContextPrivate* context, /*out*/ bool* isSupported)
+{
+    // DML_PADDING1_OPERATOR_DESC doesn't support negative padding counts i.e. StartPadding and EndPadding
+    // can't contain negative elements.
+    // For opset < 11,
+    //      if attribute 'pads' contains negative element, fall back to CPU
+    // opset >= 11
+    //      DML EP continues to produce wrong result. [TODO: After DML1.9 release, introduce new API for pad to
+    //      handle negative values for StartPadding and EndPadding]
+    *isSupported = true;
+
+    MLOperatorAttributes attributes(context);
+
+    std::vector<int32_t> padding = attributes.GetOptionalAttributeVectorInt32(AttrName::Pads);
+    *isSupported = std::none_of(padding.begin(), padding.end(), [](int32_t padCount) {return padCount < 0; });
+}
+
 DML_OP_DEFINE_CREATION_FUNCTION(Pad7, VersionedKernel<DmlOperatorPadding, 7>);
 DML_OP_DEFINE_CREATION_FUNCTION(Pad11, VersionedKernel<DmlOperatorPadding, 11>);
 DML_OP_DEFINE_CREATION_FUNCTION(Pad13, VersionedKernel<DmlOperatorPadding, 13>);
+DML_OP_DEFINE_CREATION_FUNCTION(Pad18, VersionedKernel<DmlOperatorPadding, 18>);
+DML_OP_DEFINE_CREATION_FUNCTION(Pad19, VersionedKernel<DmlOperatorPadding, 19>);
+DML_OP_DEFINE_CREATION_FUNCTION(Pad21, VersionedKernel<DmlOperatorPadding, 21>);
 
 } // namespace Dml

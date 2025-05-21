@@ -358,7 +358,11 @@ void RunTest(int64_t max_iterations,
     // we want the CUDA provider to be first, and the CPU provider second. all except the Loop node should run on
     // CUDA given that, which creates the scenario where we need to copy to/from CPU to execute the Loop node correctly.
     std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
+#if defined(USE_CUDA)
     execution_providers.push_back(DefaultCudaExecutionProvider());
+#elif defined(USE_ROCM)
+    execution_providers.push_back(DefaultRocmExecutionProvider());
+#endif
     execution_providers.push_back(DefaultCpuExecutionProvider());
 
     test.Run(expect_result, failure_message, {kTensorrtExecutionProvider}, nullptr, &execution_providers);
@@ -572,11 +576,10 @@ TEST(Loop, InfiniteLoopTermination) {
   test.Run(OpTester::ExpectResult::kExpectFailure, "Exiting due to terminate flag being set to true",
            {kTensorrtExecutionProvider, kOpenVINOExecutionProvider}, &session_run_options);  // Disable TensorRT on unsupported data type BOOL
 
-  // call get to propagate any exception
-  terminator_result.get();
-
   // done with the thread
   terminator_thread.join();
+  // call get to propagate any exception
+  terminator_result.get();
 }
 
 // Add basic test to trigger types override logic in Graph::InferAndVerifySubgraphTypes as well as
@@ -709,13 +712,13 @@ TEST(Loop, SubgraphInputShadowsOuterScopeValue) {
   NameMLValMap feeds;
   OrtValue ml_value;
 
-  CreateMLValue<float>(TestCPUExecutionProvider()->GetAllocator(0, OrtMemTypeDefault), scalar, a, &ml_value);
+  CreateMLValue<float>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], scalar, a, &ml_value);
   feeds.insert(std::make_pair("a", ml_value));
-  CreateMLValue<float>(TestCPUExecutionProvider()->GetAllocator(0, OrtMemTypeDefault), scalar, b, &ml_value);
+  CreateMLValue<float>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], scalar, b, &ml_value);
   feeds.insert(std::make_pair("b", ml_value));
-  CreateMLValue<int64_t>(TestCPUExecutionProvider()->GetAllocator(0, OrtMemTypeDefault), scalar, trip_count, &ml_value);
+  CreateMLValue<int64_t>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], scalar, trip_count, &ml_value);
   feeds.insert(std::make_pair("max_trip_count", ml_value));
-  CreateMLValue<bool>(TestCPUExecutionProvider()->GetAllocator(0, OrtMemTypeDefault), scalar, keep_going, &ml_value);
+  CreateMLValue<bool>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], scalar, keep_going, &ml_value);
   feeds.insert(std::make_pair("keep_going_inp", ml_value));
 
   // prepare outputs
@@ -802,7 +805,7 @@ TEST(Loop, Opset11WithNoVariadicInputsAndOutputs) {
       constant_attribute_tensor_proto->set_data_type(TensorProto_DataType_FLOAT);  // float scalar
       *constant_attribute_tensor_proto->mutable_float_data()->Add() = 1.0f;        // float scalar with value 1.0f
 
-      constant_node.AddAttribute("value", attr_proto);
+      constant_node.AddAttributeProto(std::move(attr_proto));
     }
 
     graph.SetInputs({&iter_num_in, &cond_in});
@@ -930,7 +933,7 @@ TEST(Loop, PassThroughSubgraphInputNoTypeOrShape) {
   test.AddOutput<float>("loop_var_0_final", {1}, {123.f});
 
   // Disable TensorRT on unsupported data type BOOL
-  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
+  test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider, kOpenVINOExecutionProvider});
 }
 
 TEST(Loop, BugFixIssue4031_implicit_input_handling) {
@@ -947,7 +950,7 @@ TEST(Loop, BugFixIssue4031_implicit_input_handling) {
 
   // prepare inputs
   OrtValue ml_value;
-  CreateMLValue<float>(TestCPUExecutionProvider()->GetAllocator(0, OrtMemTypeDefault), {1}, {123.f},
+  CreateMLValue<float>(TestCPUExecutionProvider()->CreatePreferredAllocators()[0], {1}, {123.f},
                        &ml_value);
   NameMLValMap feeds;
   feeds.insert(std::make_pair("state_var_in", ml_value));
@@ -1038,8 +1041,8 @@ TEST(Loop, IterationCountAsOutput) {
   test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});
 }
 
-#ifdef USE_CUDA
-// test that when part of the subgraph run on CUDA it executes successfully
+#if defined(USE_CUDA) || defined(USE_ROCM)
+// test that when part of the subgraph run on CUDA/ROCm it executes successfully
 TEST(Loop, MixedExecutionProviders) {
   RunOptions options{};
   options.mixed_execution_providers = true;
@@ -1169,11 +1172,9 @@ TEST(Loop, OptionalTypeAsLoopCarriedDependency) {
     std::unordered_map<std::string, int> domain_to_version;
     domain_to_version.insert({"", 16});  // Opset 16 model
 
-    // Since this test is being written at a time when only opset 15  has been released, we pass in
-    // 'false' for `allow_released_opset_only` while instantiating Model to allow this test to run
     Model model("optional type in Loop subgraph carried dependency", false, ModelMetaData(), PathString(), {},
                 domain_to_version, std::vector<ONNX_NAMESPACE::FunctionProto>{},
-                DefaultLoggingManager().DefaultLogger(), false);
+                DefaultLoggingManager().DefaultLogger());
 
     auto& graph = model.MainGraph();
 
@@ -1254,10 +1255,6 @@ TEST(Loop, OptionalTypeAsLoopCarriedDependency) {
   {
     OpTester test("Loop", 16);  // Opset 16 supports optional type
 
-    // Since this test is being written at a time when only opset 15  has been released, we set
-    // `test_allow_released_onnx_opset_only_` to 'false' to allow this test to run
-    test.test_allow_released_onnx_opset_only_ = false;
-
     auto body = create_subgraph(true);
     test.AddAttribute<GraphProto>("body", body);
 
@@ -1273,9 +1270,6 @@ TEST(Loop, OptionalTypeAsLoopCarriedDependency) {
   // CASE 2: Optional tensor + non-none
   {
     OpTester test("Loop", 16);  // Opset 16 supports optional type
-    // Since this test is being written at a time when only opset 15  has been released, we set
-    // `test_allow_released_onnx_opset_only_` to 'false' to allow this test to run
-    test.test_allow_released_onnx_opset_only_ = false;
 
     auto body = create_subgraph(true);
     test.AddAttribute<GraphProto>("body", body);
@@ -1293,9 +1287,6 @@ TEST(Loop, OptionalTypeAsLoopCarriedDependency) {
   // CASE 3: Optional tensor sequence + none
   {
     OpTester test("Loop", 16);  // Opset 16 supports optional type
-    // Since this test is being written at a time when only opset 15  has been released, we set
-    // `test_allow_released_onnx_opset_only_` to 'false' to allow this test to run
-    test.test_allow_released_onnx_opset_only_ = false;
 
     auto body = create_subgraph(false);
     test.AddAttribute<GraphProto>("body", body);
@@ -1313,9 +1304,6 @@ TEST(Loop, OptionalTypeAsLoopCarriedDependency) {
   // CASE 4: Optional tensor sequence + non-none
   {
     OpTester test("Loop", 16);  // Opset 16 supports optional type
-    // Since this test is being written at a time when only opset 15  has been released, we set
-    // `test_allow_released_onnx_opset_only_` to 'false' to allow this test to run
-    test.test_allow_released_onnx_opset_only_ = false;
 
     auto body = create_subgraph(false);
     test.AddAttribute<GraphProto>("body", body);

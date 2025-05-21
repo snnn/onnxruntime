@@ -4,12 +4,11 @@
 
 /dist/**/*.report.html
 
-/types/**/*.d.ts
-!/types/lib/**/*.d.ts
+
+/types/
 
 karma.conf.js
 tsconfig.json
 tsconfig.tsbuildinfo
-webpack.config.js
 
 *.tgz

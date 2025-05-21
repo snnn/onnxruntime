@@ -2,130 +2,144 @@
 // Licensed under the MIT License.
 
 #pragma once
-#include "core/providers/cuda/shared_inc/cuda_utils.h"
+
+#include <cuda_fp16.h>
 #include <cublas_v2.h>
+#include <gsl/gsl>
+#include <iostream>
+#include <mutex>
+#include "core/framework/allocator.h"
+#include "core/providers/cuda/cuda_common.h"
+#include "contrib_ops/cpu/bert/attention_common.h"
+#include "contrib_ops/cpu/bert/attention_parameters.h"
+#include "contrib_ops/cuda/bert/attention_data.h"
+#include "contrib_ops/cuda/bert/fastertransformer_decoder_attention/decoder_masked_multihead_attention_impl.h"
 
 namespace onnxruntime {
 namespace contrib {
 namespace cuda {
-size_t GetAttentionScratchSize(size_t element_size, int batch_size, int num_heads, int sequence_length, int all_sequence_length);
+
+constexpr int kCumulatedSequenceLengthCacheMaxBatchSize = 128;
+
+// A cache for cumulated sequence length. It will be initialized in the first request, then become read-only after that.
+struct CumulatedSequenceLengthCache {
+  onnxruntime::IAllocatorUniquePtr<void> buffer;
+  int32_t max_batch_size;
+  int32_t sequence_length;
+
+  CumulatedSequenceLengthCache() : max_batch_size(kCumulatedSequenceLengthCacheMaxBatchSize), sequence_length(0) {}
+
+  const int32_t* TryGet(int batch_size, int32_t sequence_length, cudaStream_t stream);
+
+  // Use this flag to guard the initializaton only once in multi-threading.
+  mutable std::once_flag init_once_flag_;
+};
+
+size_t
+GetAttentionScratchSize(
+    size_t element_size,
+    size_t batch_size,
+    size_t num_heads,
+    size_t sequence_length,
+    size_t all_sequence_length);
+
+size_t GetSequenceOffsetSize(int batch_size, bool has_padding);
 
 size_t GetAttentionWorkspaceSize(
     size_t element_size,
-    int batchsize,
-    int num_heads,
-    int head_size,
-    int sequence_length,
-    int past_sequence_length);
+    size_t batchsize,
+    size_t num_heads,
+    size_t qk_head_size,
+    size_t v_head_size,
+    size_t sequence_length,
+    size_t kv_sequence_length,
+    size_t total_sequence_length,
+    void* fused_runner,
+    bool use_flash_attention,
+    bool use_lean_attention,
+    bool use_fused_cross_attention,
+    bool use_memory_efficient_attention,
+    bool use_cudnn_flash_attention,
+    bool no_qkv_workspace);
 
-bool LaunchAttentionKernel(
-    const cudaDeviceProp& prop,                   // Device Properties
-    cudaStream_t stream,                          // cuda stream
-    const void* input,                            // Input tensor
-    const int* mask_index,                        // Attention mask raw data or index (end position of each sequence, or end positions and start positions). NULL means no mask.
-    gsl::span<const int64_t> mask_index_dims,     // Mask index shape
-    void* output,                                 // Output tensor
-    int batch_size,                               // Batch size (B)
-    int sequence_length,                          // Sequence length (S)
-    int num_heads,                                // Number of attention heads (N)
-    int head_size,                                // Hidden layer size per head (H)
-    void* workspace,                              // Temporary buffer
-    cublasHandle_t& cublas,                       // Cublas handle
-    const size_t element_size,                    // Element size of input tensor
-    bool is_unidirectional,                       // Whether there is unidirecitonal mask.
-    int past_sequence_length,                     // Sequence length in past state
-    const void* past,                             // Past state input
-    const void* extra_add_qk,                     // Additional Add
-    void* present                                 // Present state output
-);
+// Return true if it does not need qkv workspace, false otherwise.
+template <typename T>
+bool NoQkvWorkspace(contrib::AttentionParameters& parameters, AttentionData<T>& data);
 
-bool LaunchDecoderAttentionKernel(
-    const cudaDeviceProp& prop,                   // Device Properties
-    cudaStream_t stream,                          // Cuda stream
-    cublasHandle_t& cublas,                       // Cublas handle
-    const size_t element_size,                    // Element size of input tensor
-    const int batch_size,                         // Batch size (B)
-    const int sequence_length,                    // Sequence length (S)
-    const int kv_sequence_length,                 // Key/Value/Cache sequence length
-    const int num_heads,                          // Number of attention heads (N)
-    const int head_size,                          // Hidden layer size per head (H)
-    const bool static_kv,                         // Whether cross attention or not
-    const bool use_past,                          // Whether use cache or not
-    const bool has_layer_state,                   // Whether output cache or not
-    const bool has_key_padding_mask,              // Whether use key_padding_mask or not
-    const void* gemm_query_buffer,                // Query buffer
-    const void* gemm_kv_buffer,                   // Key and value buffer
-    const bool* key_padding_mask,                 // Key padding mask
-    const void* key_cache,                        // Input key cache
-    const void* value_cache,                      // Input value cache
-    void* qkv_buffer,                             // Temporary buffer
-    void* workspace_buffer,                       // Temporary buffer
-    void* output,                                 // Output tensor
-    void* new_key_cache,                          // New_key_cache tensor
-    void* new_value_cache                         // New_value_cache tensor
-);
+template <typename T>
+Status PrepareQkv(contrib::AttentionParameters& parameters,
+                  AttentionData<T>& data,
+                  cudaStream_t stream,
+                  int max_threads_per_block);
 
-bool LaunchTransCtx(cudaStream_t stream,
-                    const int sequence_length, const int batch_size, const int head_size, const int num_heads,
-                    const int max_threads_per_block, const bool reversed_bs, const float* input, float* output);
+template <typename T, typename QK = T>
+Status QkvToContext(
+    const cudaDeviceProp& device_prop,
+    cublasHandle_t& cublas,
+    cudnnHandle_t& cudnn,
+    Stream* stream,
+    contrib::AttentionParameters& parameters,
+    AttentionData<T>& data);
 
-bool LaunchTransCtx(cudaStream_t stream,
-                    const int sequence_length, const int batch_size, const int head_size, const int num_heads,
-                    const int max_threads_per_block, const bool reversed_bs, const half* input, half* output);
+template <typename T, typename QK>
+Status LaunchDecoderMaskedMultiHeadAttention(
+    const DecoderMaskedMultiHeadAttentionParameters& parameters,
+    cudaStream_t stream,
+    const int head_size);
 
-bool LaunchTransQkv(cudaStream_t stream, const int matrix_num,
-                    const int sequence_length, const int batch_size, const int head_size, const int num_heads,
-                    const int max_threads_per_block, const bool reversed_bs, const float* input, float* output);
+// BxNxSxH => BxSxNxH or SxBxNxH (reversed_bs is true)
+Status LaunchTransCtx(cudaStream_t stream,
+                      const int sequence_length, const int batch_size, const int head_size, const int num_heads,
+                      const int max_threads_per_block, const bool reversed_bs, const float* input, float* output);
 
-bool LaunchTransQkv(cudaStream_t stream, const int matrix_num,
-                    const int sequence_length, const int batch_size, const int head_size, const int num_heads,
-                    const int max_threads_per_block, const bool reversed_bs, const half* input, half* output);
+Status LaunchTransCtx(cudaStream_t stream,
+                      const int sequence_length, const int batch_size, const int head_size, const int num_heads,
+                      const int max_threads_per_block, const bool reversed_bs, const half* input, half* output);
 
-bool LaunchConcatTensorToTensor(cudaStream_t stream,
-                                const int all_sequence_length,
-                                const int sequence_length,
-                                const int batch_size,
-                                const int head_size,
-                                const int num_heads,
-                                const int max_threads_per_block,
-                                const int matrix_num,
-                                const float* tensor_in,
-                                const float* tensor_add,
-                                float* tensor_out);
+// BxSxMxNxH or SxBxMxNxH (reversed_bs is true) => MxBxNxSxH
+Status LaunchTransQkv(cudaStream_t stream, const int matrix_num,
+                      const int sequence_length, const int batch_size, const int head_size, const int num_heads,
+                      const int max_threads_per_block, const bool reversed_bs, const float* input, float* output,
+                      int total_matrix_count = -1);
 
-bool LaunchConcatTensorToTensor(cudaStream_t stream,
-                                const int all_sequence_length,
-                                const int sequence_length,
-                                const int batch_size,
-                                const int head_size,
-                                const int num_heads,
-                                const int max_threads_per_block,
-                                const int matrix_num,
-                                const half* tensor_in,
-                                const half* tensor_add,
-                                half* tensor_out);
+Status LaunchTransQkv(cudaStream_t stream, const int matrix_num,
+                      const int sequence_length, const int batch_size, const int head_size, const int num_heads,
+                      const int max_threads_per_block, const bool reversed_bs, const half* input, half* output,
+                      int total_matrix_count = -1);
 
-bool LaunchConcatPastToPresent(cudaStream_t stream,
-                               const int all_sequence_length,
-                               const int sequence_length,
-                               const int batch_size,
-                               const int head_size,
-                               const int num_heads,
-                               const int max_threads_per_block,
-                               const float* past,
-                               const float* k_v,
-                               float* present);
+Status Transpose_BSNH_to_BNSH(const int batch_size, const int sequence_length, const int num_heads, const int head_size,
+                              const float* input, float* output, cudaStream_t stream, const int max_threads_per_block);
 
-bool LaunchConcatPastToPresent(cudaStream_t stream,
-                               const int all_sequence_length,
-                               const int sequence_length,
-                               const int batch_size,
-                               const int head_size,
-                               const int num_heads,
-                               const int max_threads_per_block,
-                               const half* past,
-                               const half* k_v,
-                               half* present);
+Status Transpose_BSNH_to_BNSH(const int batch_size, const int sequence_length, const int num_heads, const int head_size,
+                              const half* input, half* output, cudaStream_t stream, const int max_threads_per_block);
+
+template <typename T>
+Status ConcatPastToPresent(int batch_size, int num_heads, int qk_head_size, int v_head_size,
+                           int sequence_length, int total_sequence_length,
+                           cudaStream_t stream,
+                           int max_threads_per_block,
+                           AttentionData<T>& data);
+
+template <typename T>
+Status PastPresentBufferShare(int batch_size, int num_heads, int qk_head_size, int v_head_size,
+                              int sequence_length, void* fused_runner,
+                              contrib::AttentionParameters& parameters,
+                              AttentionData<T>& data,
+                              cudaStream_t stream,
+                              int max_threads_per_block);
+
+template <typename T>
+Status LaunchStridedCopy(
+    cudaStream_t stream,
+    const T* in, int4 in_shape, longlong4 in_strides, const int* in_seqlens_offset,  // coord (b,n,s,h)
+    T* out, longlong4 out_strides, const int* out_seqlens_offset,                    // coord (b,n,s,h)
+    int max_threads_per_block);
+
+template <typename T>
+Status LaunchStridedCopy(cudaStream_t stream,
+                         const T* in, int4 in_shape, longlong4 in_strides,  // coord (b,n,s,h)
+                         T* out, longlong4 out_strides,                     // coord (b,n,s,h)
+                         int max_threads_per_block);
 
 }  // namespace cuda
 }  // namespace contrib

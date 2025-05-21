@@ -84,7 +84,7 @@ struct Softplus : public ElementWiseRangedTransform<T> {
   Status Init(const onnxruntime::NodeAttributes&) {
     return Status::OK();
   }
-  GSL_SUPPRESS(r .11)
+  GSL_SUPPRESS(r.11)
   ElementWiseRangedTransform<T>* Copy() const {
     using T1 = typename std::remove_pointer<decltype(this)>::type;
     using T2 = typename std::remove_const<T1>::type;
@@ -98,7 +98,7 @@ struct Softplus : public ElementWiseRangedTransform<T> {
     T* output_ptr = this->output + first;
     ConstEigenVectorArrayMap<T> xm(this->input + first, len);
     EigenVectorArrayMap<T> ym(output_ptr, len);
-    ym = (xm > 0).select(xm + ((-xm).exp() + 1.0f).log(), ((xm).exp() + 1.0f).log());
+    ym = (xm > 0).select(xm + ((-xm).exp()).log1p(), ((xm).exp()).log1p());
   }
 };
 
@@ -107,10 +107,10 @@ struct Relu : public ElementWiseRangedTransform<T> {
   Status Init(const onnxruntime::NodeAttributes&) {
     return Status::OK();
   }
-  GSL_SUPPRESS(r .11)
+  GSL_SUPPRESS(r.11)
   ElementWiseRangedTransform<T>* Copy() const {  // replace it with a macro. why this?
     using T1 = typename std::remove_pointer<decltype(this)>::type;
-    using T2 = typename std::remove_const<T1>::type;  //redundant?
+    using T2 = typename std::remove_const<T1>::type;  // redundant?
     return new T2(*this);
   }
   float Cost() const final {
@@ -130,7 +130,7 @@ struct Sigmoid : public ElementWiseRangedTransform<T> {
   Status Init(const onnxruntime::NodeAttributes&) {
     return Status::OK();
   }
-  GSL_SUPPRESS(r .11)
+  GSL_SUPPRESS(r.11)
   ElementWiseRangedTransform<T>* Copy() const {
     using T1 = typename std::remove_pointer<decltype(this)>::type;
     using T2 = typename std::remove_const<T1>::type;
@@ -156,7 +156,7 @@ struct Softsign : public ElementWiseRangedTransform<T> {
   Status Init(const onnxruntime::NodeAttributes&) {
     return Status::OK();
   }
-  GSL_SUPPRESS(r .11)
+  GSL_SUPPRESS(r.11)
   ElementWiseRangedTransform<T>* Copy() const {
     using T1 = typename std::remove_pointer<decltype(this)>::type;
     using T2 = typename std::remove_const<T1>::type;
@@ -179,7 +179,7 @@ struct Tanh : public ElementWiseRangedTransform<T> {
   Status Init(const onnxruntime::NodeAttributes&) {
     return Status::OK();
   }
-  GSL_SUPPRESS(r .11)
+  GSL_SUPPRESS(r.11)
   ElementWiseRangedTransform<T>* Copy() const {
     using T1 = typename std::remove_pointer<decltype(this)>::type;
     using T2 = typename std::remove_const<T1>::type;
@@ -229,7 +229,7 @@ struct Selu : public ElementWiseRangedTransform<T> {
     T* output_ptr = this->output + first;
     ConstEigenVectorArrayMap<T> xm(this->input + first, len);
     EigenVectorArrayMap<T> ym(output_ptr, len);
-    ym = (T)gamma * (xm.cwiseMax(0.0f) + ((T)alpha * (xm.array().exp() - 1.0f)).cwiseMin(0.0f));
+    ym = (xm > 0).select((T)gamma * xm, (T)gamma * (T)alpha * (xm.exp() - 1.0f));
   }
 };
 }  // namespace functors

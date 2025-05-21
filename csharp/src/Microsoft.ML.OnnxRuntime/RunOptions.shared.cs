@@ -79,11 +79,8 @@ namespace Microsoft.ML.OnnxRuntime
             }
             set
             {
-                var logIdPinned = GCHandle.Alloc(NativeOnnxValueHelper.StringToZeroTerminatedUtf8(value), GCHandleType.Pinned);
-                using (var pinnedlogIdName = new PinnedGCHandle(logIdPinned))
-                {
-                    NativeApiStatus.VerifySuccess(NativeMethods.OrtRunOptionsSetRunTag(handle, pinnedlogIdName.Pointer));
-                }
+                var utf8 = NativeOnnxValueHelper.StringToZeroTerminatedUtf8(value);
+                NativeApiStatus.VerifySuccess(NativeMethods.OrtRunOptionsSetRunTag(handle, utf8));
 
                 _logId = value;
             }
@@ -119,6 +116,30 @@ namespace Microsoft.ML.OnnxRuntime
         }
         private bool _terminate = false; //value set to default value of the C++ RunOptions
 
+        /// <summary>
+        /// Set a single run configuration entry as a pair of strings
+        /// If a configuration with same key exists, this will overwrite the configuration with the given configValue.
+        /// </summary>
+        /// <param name="configKey">config key name</param>
+        /// <param name="configValue">config key value</param>
+        public void AddRunConfigEntry(string configKey, string configValue)
+        {
+            var utf8Key = NativeOnnxValueHelper.StringToZeroTerminatedUtf8(configKey);
+            var utf8Value = NativeOnnxValueHelper.StringToZeroTerminatedUtf8(configValue);
+            NativeApiStatus.VerifySuccess(NativeMethods.OrtAddRunConfigEntry(handle, utf8Key, utf8Value));
+        }
+
+        /// <summary>
+        /// Appends the specified lora adapter to the list of active lora adapters
+        /// for this RunOptions instance. All run calls with this instant will
+        /// make use of the activated Lora Adapters. An adapter is considered active
+        /// if it is added to RunOptions that are used during Run() calls.
+        /// </summary>
+        /// <param name="loraAdapter">Lora adapter instance</param>
+        public void AddActiveLoraAdapter(OrtLoraAdapter loraAdapter)
+        {
+            NativeApiStatus.VerifySuccess(NativeMethods.OrtRunOptionsAddActiveLoraAdapter(handle, loraAdapter.Handle));
+        }
 
         #region SafeHandle
         /// <summary>

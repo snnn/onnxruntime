@@ -3,32 +3,61 @@
 
 #pragma once
 
+#include <charconv>
 #include <locale>
 #include <sstream>
+#include <string_view>
 #include <type_traits>
 
 #include "core/common/common.h"
 
 namespace onnxruntime {
 
+namespace detail {
+
+// Whether we will use std::from_chars() to parse to `T`.
+#if defined(_LIBCPP_VERSION)
+// Note: Currently (e.g., in LLVM 19), libc++'s std::from_chars() doesn't support floating point types yet.
+template <typename T>
+constexpr bool ParseWithFromChars = !std::is_same_v<bool, T> && std::is_integral_v<T>;
+#else
+template <typename T>
+constexpr bool ParseWithFromChars = !std::is_same_v<bool, T> && (std::is_integral_v<T> || std::is_floating_point_v<T>);
+#endif
+
+}  // namespace detail
+
 /**
  * Tries to parse a value from an entire string.
+ * If successful, sets `value` and returns true. Otherwise, does not modify `value` and returns false.
  */
 template <typename T>
-bool TryParseStringWithClassicLocale(const std::string& str, T& value) {
-  ORT_IF_CONSTEXPR (std::is_integral<T>::value && std::is_unsigned<T>::value) {
-    // if T is unsigned integral type, reject negative values which will wrap
-    if (!str.empty() && str[0] == '-') {
-      return false;
-    }
+std::enable_if_t<detail::ParseWithFromChars<T>, bool>
+TryParseStringWithClassicLocale(std::string_view str, T& value) {
+  T parsed_value{};
+  const auto [ptr, ec] = std::from_chars(str.data(), str.data() + str.size(), parsed_value);
+
+  if (ec != std::errc{}) {
+    return false;
   }
 
+  if (ptr != str.data() + str.size()) {
+    return false;
+  }
+
+  value = parsed_value;
+  return true;
+}
+
+template <typename T>
+std::enable_if_t<!detail::ParseWithFromChars<T>, bool>
+TryParseStringWithClassicLocale(std::string_view str, T& value) {
   // don't allow leading whitespace
   if (!str.empty() && std::isspace(str[0], std::locale::classic())) {
     return false;
   }
 
-  std::istringstream is{str};
+  std::istringstream is{std::string{str}};
   is.imbue(std::locale::classic());
   T parsed_value{};
 
@@ -43,12 +72,12 @@ bool TryParseStringWithClassicLocale(const std::string& str, T& value) {
   return true;
 }
 
-inline bool TryParseStringWithClassicLocale(const std::string& str, std::string& value) {
+inline bool TryParseStringWithClassicLocale(std::string_view str, std::string& value) {
   value = str;
   return true;
 }
 
-inline bool TryParseStringWithClassicLocale(const std::string& str, bool& value) {
+inline bool TryParseStringWithClassicLocale(std::string_view str, bool& value) {
   if (str == "0" || str == "False" || str == "false") {
     value = false;
     return true;
@@ -66,7 +95,7 @@ inline bool TryParseStringWithClassicLocale(const std::string& str, bool& value)
  * Parses a value from an entire string.
  */
 template <typename T>
-Status ParseStringWithClassicLocale(const std::string& s, T& value) {
+Status ParseStringWithClassicLocale(std::string_view s, T& value) {
   ORT_RETURN_IF_NOT(TryParseStringWithClassicLocale(s, value), "Failed to parse value: \"", value, "\"");
   return Status::OK();
 }
@@ -75,7 +104,7 @@ Status ParseStringWithClassicLocale(const std::string& s, T& value) {
  * Parses a value from an entire string.
  */
 template <typename T>
-T ParseStringWithClassicLocale(const std::string& s) {
+T ParseStringWithClassicLocale(std::string_view s) {
   T value{};
   ORT_THROW_IF_ERROR(ParseStringWithClassicLocale(s, value));
   return value;

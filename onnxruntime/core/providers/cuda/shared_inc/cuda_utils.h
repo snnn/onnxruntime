@@ -6,11 +6,14 @@
 
 #pragma once
 
+#include <cuda_fp16.h>
 #include <memory>
 #include <type_traits>
 #include <vector>
-#include <gsl/gsl>
+#include <limits>
 
+#include <gsl/gsl>
+#include "core/framework/float16.h"
 #include "core/providers/cuda/shared_inc/fast_divmod.h"
 
 namespace onnxruntime {
@@ -33,7 +36,7 @@ enum class BroadcastIndexType : int32_t {
 template <typename T>
 class IConstantBuffer {
  public:
-  virtual ~IConstantBuffer(){};
+  virtual ~IConstantBuffer() {};
   virtual const T* GetBuffer(cudaStream_t stream, size_t count) = 0;
 };
 
@@ -50,8 +53,17 @@ void Fill(cudaStream_t stream, T* output, T value, int64_t count);
 */
 template <typename T, int32_t capacity = 8>
 struct TArray {
-  TArray() : size_(0), data_() {
-  }
+#if defined(USE_ROCM)
+#define TARRAY_CONSTRUCTOR_SPECIFIERS __host__ __device__
+#else
+#define TARRAY_CONSTRUCTOR_SPECIFIERS
+#endif
+
+  TARRAY_CONSTRUCTOR_SPECIFIERS TArray() = default;
+  TARRAY_CONSTRUCTOR_SPECIFIERS TArray(const TArray&) = default;
+  TARRAY_CONSTRUCTOR_SPECIFIERS TArray& operator=(const TArray&) = default;
+
+#undef TARRAY_CONSTRUCTOR_SPECIFIERS
 
   TArray(int32_t size) : size_(size), data_() {
     ORT_ENFORCE(
@@ -99,9 +111,75 @@ struct TArray {
   static constexpr int32_t Capacity() { return capacity; };
 
  private:
-  int32_t size_;
-  T data_[capacity];
+  int32_t size_ = 0;
+  T data_[capacity] = {};
 };
+
+// Bitmask tensor is uint_32 type.
+using BitmaskElementType = uint32_t;
+constexpr int kNumBitsPerBitmaskElement = std::numeric_limits<BitmaskElementType>::digits;
+
+template <typename T>
+struct NumericLimits {
+  __inline__ __host__ __device__ static T Lowest() {
+    return std::numeric_limits<T>::lowest();
+  }
+  __inline__ __host__ __device__ static T Max() {
+    return std::numeric_limits<T>::max();
+  }
+};
+
+template <>
+struct NumericLimits<half> {
+  __inline__ __host__ __device__ static half Lowest() {
+    return -65504.0f;
+  }
+
+  __inline__ __host__ __device__ static half Max() {
+#ifdef CUDART_MAX_NORMAL_FP16  // defined in cuda 12.3 or later
+    return CUDART_MAX_NORMAL_FP16;
+#else
+    return 65504.0f;
+#endif
+  }
+};
+
+// TODO Where to put this? good places might be
+// core/framework/tensor_shape.h
+// core/util/matrix_layout.h
+
+constexpr bool LAYOUT_NCHW = false;
+constexpr bool LAYOUT_NHWC = true;
+
+template <bool IsNHWC>
+struct Channels;
+
+template <>
+struct Channels<LAYOUT_NHWC> {
+  static constexpr size_t N = 0;
+  static constexpr size_t H = 1;
+  static constexpr size_t W = 2;
+  static constexpr size_t C = 3;
+};
+
+template <>
+struct Channels<LAYOUT_NCHW> {
+  static constexpr size_t N = 0;
+  static constexpr size_t C = 1;
+  static constexpr size_t H = 2;
+  static constexpr size_t W = 3;
+};
+
+// Calculates ceil(a / b). User must be careful to ensure that there
+// is no overflow or underflow in the calculation.
+template <typename T>
+constexpr T divUp(T a, T b) { return (a + b - (T)1) / b; }
+
+// Rounds a up to the next highest multiple of b. User must be careful
+// to ensure that there is no overflow or underflow in the calculation
+// of divUp.
+template <typename T>
+constexpr T roundUp(T a, T b) { return divUp<T>(a, b) * b; }
 
 }  // namespace cuda
 }  // namespace onnxruntime

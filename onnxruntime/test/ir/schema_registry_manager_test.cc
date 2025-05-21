@@ -85,16 +85,16 @@ TEST(SchemaRegistryManager, OpsetRegTest) {
 
   // Register the second version of the same op-set on the second registry, overriding one operator
   ASSERT_STATUS_OK(registry2->RegisterOpSet(schemaV2, "Domain1", 1, 2));
-  //Now the registry1 has: (op1,domain1,version1), (op2,domain1,version1), (op2,domain2,version1)
-  //registry2 has:(op1,domain1,version2)
+  // Now the registry1 has: (op1,domain1,version1), (op2,domain1,version1), (op2,domain2,version1)
+  // registry2 has:(op1,domain1,version2)
   ASSERT_TRUE(registry2->GetSchema("Op1", 1, "Domain1") == nullptr);
   ASSERT_TRUE(registry2->GetSchema("Op1", 2, "Domain1") != nullptr);
-  //Fail because this registery doesn't have the information of opset3
+  // Fail because this registry doesn't have the information of opset3
   ASSERT_TRUE(registry2->GetSchema("Op1", 3, "Domain1") == nullptr);
 
   std::shared_ptr<onnxruntime::OnnxRuntimeOpSchemaRegistry> registry3 = std::make_shared<OnnxRuntimeOpSchemaRegistry>();
   ASSERT_STATUS_OK(registry3->RegisterOpSet(schemaV2, "Domain1", 1, 3));
-  //Now it's ok.
+  // Now it's ok.
   ASSERT_TRUE(registry3->GetSchema("Op1", 3, "Domain1") != nullptr);
 
   ASSERT_TRUE(manager.GetSchema("Op1", 1, "Domain1")->since_version() == 1);
@@ -102,7 +102,7 @@ TEST(SchemaRegistryManager, OpsetRegTest) {
   ASSERT_TRUE(manager.GetSchema("Op2", 1, "Domain1")->since_version() == 1);
   ASSERT_TRUE(manager.GetSchema("Op2", 2, "Domain1")->since_version() == 1);
 
-  // Add a new operator set which is verion 5, with a baseline of version 4, meaning that
+  // Add a new operator set which is version 5, with a baseline of version 4, meaning that
   // there is a gap at version 3.
   std::shared_ptr<onnxruntime::OnnxRuntimeOpSchemaRegistry> registryV5 = std::make_shared<OnnxRuntimeOpSchemaRegistry>();
   manager.RegisterRegistry(registryV5);
@@ -126,7 +126,7 @@ TEST(SchemaRegistryManager, OpsetRegTest) {
   // Note that "Op5" has SinceVersion equal to 1, but a V1 operator set was already registered
   // without this operator.  This would normally be invalid, and the registry with the missing
   // operator could trigger the operator lookup to fail.  Version 1 is a special case to allow
-  // for experimental operators, and is accomplished by not reducing the targetted version to
+  // for experimental operators, and is accomplished by not reducing the targeted version to
   // zero in OnnxRuntimeOpSchemaRegistry::GetSchemaAndHistory.
   // TODO - Consider making the registration algorithm robust to this invalid usage in general
   ASSERT_TRUE(manager.GetSchema("Op5", 5, "Domain1")->since_version() == 1);

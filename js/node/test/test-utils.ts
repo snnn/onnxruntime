@@ -3,23 +3,34 @@
 
 import assert from 'assert';
 import * as fs from 'fs-extra';
-import {jsonc} from 'jsonc';
-import * as onnx_proto from 'onnx-proto';
-import {InferenceSession, Tensor} from 'onnxruntime-common';
+import { jsonc } from 'jsonc';
+import { InferenceSession, Tensor } from 'onnxruntime-common';
 import * as path from 'path';
+
+import * as onnx_proto from './ort-schema/protobuf/onnx';
 
 export const TEST_ROOT = __dirname;
 export const TEST_DATA_ROOT = path.join(TEST_ROOT, 'testdata');
 
 export const ORT_ROOT = path.join(__dirname, '../../..');
-export const NODE_TESTS_ROOT = path.join(ORT_ROOT, 'cmake/external/onnx/onnx/backend/test/data/node');
+export const NODE_TESTS_ROOT = path.join(ORT_ROOT, 'js/test/data/node');
 
 export const SQUEEZENET_INPUT0_DATA: number[] = require(path.join(TEST_DATA_ROOT, 'squeezenet.input0.json'));
 export const SQUEEZENET_OUTPUT0_DATA: number[] = require(path.join(TEST_DATA_ROOT, 'squeezenet.output0.json'));
 
-export const BACKEND_TEST_SERIES_FILTERS: {[name: string]: string[]} =
-    jsonc.readSync(path.join(ORT_ROOT, 'onnxruntime/test/testdata/onnx_backend_test_series_filters.jsonc'));
+const BACKEND_TEST_SERIES_FILTERS: { [name: string]: Array<string | [string, string]> } = jsonc.readSync(
+  path.join(ORT_ROOT, 'onnxruntime/test/testdata/onnx_backend_test_series_filters.jsonc'),
+);
 
+const OVERRIDES: {
+  atol_default: number;
+  rtol_default: number;
+  atol_overrides: { [name: string]: number };
+  rtol_overrides: { [name: string]: number };
+} = jsonc.readSync(path.join(ORT_ROOT, 'onnxruntime/test/testdata/onnx_backend_test_series_overrides.jsonc'));
+
+const ATOL_DEFAULT = OVERRIDES.atol_default;
+const RTOL_DEFAULT = OVERRIDES.rtol_default;
 
 export const NUMERIC_TYPE_MAP = new Map<Tensor.Type, new (len: number) => Tensor.DataType>([
   ['float32', Float32Array],
@@ -47,14 +58,14 @@ export function createTestData(type: Tensor.Type, length: number): Tensor.DataTy
   } else {
     data = new (NUMERIC_TYPE_MAP.get(type)!)(length);
     for (let i = 0; i < length; i++) {
-      data[i] = (type === 'uint64' || type === 'int64') ? BigInt(i) : i;
+      data[i] = type === 'uint64' || type === 'int64' ? BigInt(i) : i;
     }
   }
   return data;
 }
 
 // a simple function to create a tensor for test
-export function createTestTensor(type: Tensor.Type, lengthOrDims?: number|number[]): Tensor {
+export function createTestTensor(type: Tensor.Type, lengthOrDims?: number | number[]): Tensor {
   let length = 100;
   let dims = [100];
   if (typeof lengthOrDims === 'number') {
@@ -70,27 +81,31 @@ export function createTestTensor(type: Tensor.Type, lengthOrDims?: number|number
 
 // call the addon directly to make sure DLL is loaded
 export function warmup(): void {
-  describe('Warmup', async function() {
+  describe('Warmup', async function () {
     // eslint-disable-next-line no-invalid-this
     this.timeout(0);
     // we have test cases to verify correctness in other place, so do no check here.
     try {
-      const session = await InferenceSession.create(path.join(TEST_DATA_ROOT, 'test_types_INT32.pb'));
-      await session.run({input: new Tensor(new Float32Array(5), [1, 5])}, {output: null}, {});
-    } catch (e) {
-    }
+      const session = await InferenceSession.create(path.join(TEST_DATA_ROOT, 'test_types_int32.onnx'));
+      await session.run({ input: new Tensor(new Float32Array(5), [1, 5]) }, { output: null }, {});
+    } catch (e) {}
   });
 }
 
 export function assertFloatEqual(
-    actual: number[]|Float32Array|Float64Array, expected: number[]|Float32Array|Float64Array): void {
-  const THRESHOLD_ABSOLUTE_ERROR = 1.0e-4;
-  const THRESHOLD_RELATIVE_ERROR = 1.000001;
+  actual: number[] | Float32Array | Float64Array,
+  expected: number[] | Float32Array | Float64Array,
+  atol?: number,
+  rtol?: number,
+): void {
+  const absolute_tol: number = atol ?? 1.0e-4;
+  const relative_tol: number = 1 + (rtol ?? 1.0e-6);
 
   assert.strictEqual(actual.length, expected.length);
 
   for (let i = actual.length - 1; i >= 0; i--) {
-    const a = actual[i], b = expected[i];
+    const a = actual[i],
+      b = expected[i];
 
     if (a === b) {
       continue;
@@ -99,7 +114,7 @@ export function assertFloatEqual(
     // check for NaN
     //
     if (Number.isNaN(a) && Number.isNaN(b)) {
-      continue;  // 2 numbers are NaN, treat as equal
+      continue; // 2 numbers are NaN, treat as equal
     }
     if (Number.isNaN(a) || Number.isNaN(b)) {
       // one is NaN and the other is not
@@ -114,11 +129,11 @@ export function assertFloatEqual(
     //   test fail
     // endif
     //
-    if (Math.abs(a - b) < THRESHOLD_ABSOLUTE_ERROR) {
-      continue;  // absolute error check pass
+    if (Math.abs(a - b) < absolute_tol) {
+      continue; // absolute error check pass
     }
-    if (a !== 0 && b !== 0 && a * b > 0 && a / b < THRESHOLD_RELATIVE_ERROR && b / a < THRESHOLD_RELATIVE_ERROR) {
-      continue;  // relative error check pass
+    if (a !== 0 && b !== 0 && a * b > 0 && a / b < relative_tol && b / a < relative_tol) {
+      continue; // relative error check pass
     }
 
     // if code goes here, it means both (abs/rel) check failed.
@@ -126,12 +141,22 @@ export function assertFloatEqual(
   }
 }
 
-export function assertDataEqual(type: Tensor.Type, actual: Tensor.DataType, expected: Tensor.DataType): void {
+export function assertDataEqual(
+  type: Tensor.Type,
+  actual: Tensor.DataType,
+  expected: Tensor.DataType,
+  atol?: number,
+  rtol?: number,
+): void {
   switch (type) {
     case 'float32':
     case 'float64':
       assertFloatEqual(
-          actual as number[] | Float32Array | Float64Array, expected as number[] | Float32Array | Float64Array);
+        actual as number[] | Float32Array | Float64Array,
+        expected as number[] | Float32Array | Float64Array,
+        atol,
+        rtol,
+      );
       break;
 
     case 'uint8':
@@ -153,7 +178,7 @@ export function assertDataEqual(type: Tensor.Type, actual: Tensor.DataType, expe
 }
 
 // This function check whether 2 tensors should be considered as 'match' or not
-export function assertTensorEqual(actual: Tensor, expected: Tensor): void {
+export function assertTensorEqual(actual: Tensor, expected: Tensor, atol?: number, rtol?: number): void {
   assert(typeof actual === 'object');
   assert(typeof expected === 'object');
 
@@ -168,18 +193,22 @@ export function assertTensorEqual(actual: Tensor, expected: Tensor): void {
   assert.strictEqual(actualType, expectedType);
   assert.deepStrictEqual(actualDims, expectedDims);
 
-  assertDataEqual(actualType, actual.data, expected.data);
+  assertDataEqual(actualType, actual.data, expected.data, atol, rtol);
 }
 
 export function loadTensorFromFile(pbFile: string): Tensor {
   const tensorProto = onnx_proto.onnx.TensorProto.decode(fs.readFileSync(pbFile));
   let transferredTypedArray: Tensor.DataType;
   let type: Tensor.Type;
-  const dims = tensorProto.dims.map((dim) => typeof dim === 'number' ? dim : dim.toNumber());
+  const dims = tensorProto.dims.map((dim) => (typeof dim === 'number' ? dim : dim.toNumber()));
 
-
-  if (tensorProto.dataType === 8) {  // string
-    return new Tensor('string', tensorProto.stringData.map(i => i.toString()), dims);
+  if (tensorProto.dataType === 8) {
+    // string
+    return new Tensor(
+      'string',
+      tensorProto.stringData.map((i) => i.toString()),
+      dims,
+    );
   } else {
     switch (tensorProto.dataType) {
       //     FLOAT = 1,
@@ -242,19 +271,22 @@ export function loadTensorFromFile(pbFile: string): Tensor {
       default:
         throw new Error(`not supported tensor type: ${tensorProto.dataType}`);
     }
-    const transferredTypedArrayRawDataView =
-        new Uint8Array(transferredTypedArray.buffer, transferredTypedArray.byteOffset, tensorProto.rawData.byteLength);
+    const transferredTypedArrayRawDataView = new Uint8Array(
+      transferredTypedArray.buffer,
+      transferredTypedArray.byteOffset,
+      tensorProto.rawData.byteLength,
+    );
     transferredTypedArrayRawDataView.set(tensorProto.rawData);
 
     return new Tensor(type, transferredTypedArray, dims);
   }
 }
 
-export function shouldSkipModel(model: string, eps: string[]): boolean {
-  const filters = ['(FLOAT16)'];
+function loadFiltersRegex(): Array<{ opset?: RegExp | undefined; name: RegExp }> {
+  const filters: Array<string | [string, string]> = ['(FLOAT16)'];
   filters.push(...BACKEND_TEST_SERIES_FILTERS.current_failing_tests);
 
-  if (process.arch === 'x32') {
+  if (process.arch === 'ia32') {
     filters.push(...BACKEND_TEST_SERIES_FILTERS.current_failing_tests_x86);
   }
 
@@ -263,14 +295,38 @@ export function shouldSkipModel(model: string, eps: string[]): boolean {
   filters.push(...BACKEND_TEST_SERIES_FILTERS.failing_permanently);
   filters.push(...BACKEND_TEST_SERIES_FILTERS.test_with_types_disabled_due_to_binary_size_concerns);
 
-  for (const filter of filters) {
-    const regex = new RegExp(filter);
+  filters.push(...BACKEND_TEST_SERIES_FILTERS.failing_permanently_nodejs_binding);
+
+  return filters.map((filter) =>
+    typeof filter === 'string'
+      ? { name: new RegExp(filter) }
+      : { opset: new RegExp(filter[0]), name: new RegExp(filter[1]) },
+  );
+}
+
+const BACKEND_TEST_SERIES_FILTERS_REGEX = loadFiltersRegex();
+
+export function shouldSkipModel(model: string, opset: string, eps: string[]): boolean {
+  for (const regex of BACKEND_TEST_SERIES_FILTERS_REGEX) {
+    if (regex.opset) {
+      if (!regex.opset.test(opset)) {
+        continue;
+      }
+    }
     for (const ep of eps) {
-      if (regex.test(`${model}_${ep}`)) {
+      if (regex.name.test(`${model}_${ep}`)) {
         return true;
       }
     }
   }
 
   return false;
+}
+
+export function atol(model: string): number {
+  return OVERRIDES.atol_overrides[model] ?? ATOL_DEFAULT;
+}
+
+export function rtol(model: string): number {
+  return OVERRIDES.rtol_overrides[model] ?? RTOL_DEFAULT;
 }

@@ -26,11 +26,13 @@ REGISTER_KERNEL_TYPED(MLFloat16)
 
 template <typename T>
 ImageScaler<T>::ImageScaler(const OpKernelInfo& info) : CudaKernel(info) {
-  ORT_ENFORCE(info.GetAttr<float>("scale", &scale_).IsOK());
-  ORT_ENFORCE(info.GetAttrs<float>("bias", bias_).IsOK());
+  ORT_THROW_IF_ERROR(info.GetAttr<float>("scale", &scale_));
+  ORT_THROW_IF_ERROR(info.GetAttrs<float>("bias", bias_));
 
-  b_data_ = GetScratchBuffer<float>(bias_.size());
-  CUDA_CALL_THROW(cudaMemcpyAsync(b_data_.get(), bias_.data(), sizeof(float) * bias_.size(), cudaMemcpyHostToDevice, Stream()));
+  b_data_ = GetScratchBuffer<float>(bias_.size(), nullptr);
+  // the transfer in kernel construction need to be sync on default stream.
+  CUDA_CALL_THROW(cudaMemcpyAsync(b_data_.get(), bias_.data(), sizeof(float) * bias_.size(), cudaMemcpyHostToDevice, nullptr));
+  CUDA_CALL_THROW(cudaStreamSynchronize(nullptr));
 }
 
 template <typename T>
@@ -53,12 +55,12 @@ Status ImageScaler<T>::ComputeInternal(OpKernelContext* context) const {
 
   typedef typename ToCudaType<T>::MappedType CudaT;
   ImageScalerImpl<CudaT>(
-      Stream(),
-      reinterpret_cast<const CudaT*>(X->template Data<T>()),
+      Stream(context),
+      reinterpret_cast<const CudaT*>(X->Data<T>()),
       scale_,
       b_data_.get(),
       dims.data(),
-      reinterpret_cast<CudaT*>(Y->template MutableData<T>()),
+      reinterpret_cast<CudaT*>(Y->MutableData<T>()),
       X->Shape().Size());
 
   return Status::OK();

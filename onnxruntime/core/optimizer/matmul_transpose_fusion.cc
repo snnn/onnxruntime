@@ -66,7 +66,8 @@ static Node* GetTransposeNodeFromOutput(Graph& graph, NodeArg& node_arg, bool& i
 
   // We can fuse the Transpose node only when the last axis of original tensor is within the last two dims after transpose.
   int64_t last_axis = static_cast<int64_t>(rank) - 1;
-  size_t last_axis_index = perms[rank - 1] == last_axis ? rank - 1 : perms[rank - 2] == last_axis ? rank - 2 : rank;
+  size_t last_axis_index = perms[rank - 1] == last_axis ? rank - 1 : perms[rank - 2] == last_axis ? rank - 2
+                                                                                                  : rank;
   if (last_axis_index == rank) {
     return nullptr;
   }
@@ -90,7 +91,7 @@ static Node* GetTransposeNodeFromOutput(Graph& graph, NodeArg& node_arg, bool& i
   return trans_node;
 }
 
-static size_t UpdateConsumerCount(Graph& graph, NodeArg* target, std::unordered_map<NodeArg*, size_t>& count_map) {
+static size_t UpdateConsumerCount(Graph& graph, NodeArg* target, InlinedHashMap<NodeArg*, size_t>& count_map) {
   const auto& node_consumers = graph.GetConsumerNodes(target->Name());
   ORT_ENFORCE(!node_consumers.empty());
   auto it = count_map.find(target);
@@ -104,37 +105,37 @@ static size_t UpdateConsumerCount(Graph& graph, NodeArg* target, std::unordered_
 }
 
 /* ReorderCastAndTranspose:
-*  Interchange Cast and Transpose nodes in the graph and return the new Transpose node if possible else nullptr.
-*
-*
-*  Transform the following pattern
-*                              |
-*                         _____|______
-*                         |Transpose |
-*                         |__________|
-*                              |
-*                              |
-*                         _____V______
-*                         |  Cast    |
-*                         |__________|
-*                              |
-*                              V
-*
-*  to
-*                              |
-*                         _____|______
-*                         |  Cast    |
-*                         |__________|
-*                              |
-*                              |
-*                         _____V______
-*                         | Transpose|
-*                         |__________|
-*                              |
-*                              V
-*/
+ *  Interchange Cast and Transpose nodes in the graph and return the new Transpose node if possible else nullptr.
+ *
+ *
+ *  Transform the following pattern
+ *                              |
+ *                         _____|______
+ *                         |Transpose |
+ *                         |__________|
+ *                              |
+ *                              |
+ *                         _____V______
+ *                         |  Cast    |
+ *                         |__________|
+ *                              |
+ *                              V
+ *
+ *  to
+ *                              |
+ *                         _____|______
+ *                         |  Cast    |
+ *                         |__________|
+ *                              |
+ *                              |
+ *                         _____V______
+ *                         | Transpose|
+ *                         |__________|
+ *                              |
+ *                              V
+ */
 static Node* ReorderCastAndTranspose(Graph& graph, Node* cast,
-                                     std::unordered_map<NodeArg*, size_t>& consumer_count,
+                                     InlinedHashMap<NodeArg*, size_t>& consumer_count,
                                      std::deque<onnxruntime::NodeIndex>& removed_nodes,
                                      bool& is_trans, bool& is_trans_batch) {
   ORT_ENFORCE(cast != nullptr);
@@ -153,20 +154,20 @@ static Node* ReorderCastAndTranspose(Graph& graph, Node* cast,
   const ONNX_NAMESPACE::TensorProto_DataType element_type =
       static_cast<ONNX_NAMESPACE::TensorProto_DataType>(cast_output->TypeAsProto()->tensor_type().elem_type());
   new_cast_output_type_proto.mutable_tensor_type()->set_elem_type(element_type);
-  auto& new_cast_output = graph.GetOrCreateNodeArg(cast_output->Name() + "_transformed", &new_cast_output_type_proto);
+  auto& new_cast_output = graph.GetOrCreateNodeArg(cast_output->Name() + "/MatmulTransposeFusion/", &new_cast_output_type_proto);
 
-  const std::vector<NodeArg*> new_cast_input_defs{transpose_input};
-  const std::vector<NodeArg*> new_cast_output_defs{&new_cast_output};
-  const std::vector<NodeArg*> new_transpose_input_defs = {&new_cast_output};
-  const std::vector<NodeArg*> new_transpose_output_defs = {cast_output};
+  const std::array new_cast_input_defs{transpose_input};
+  const std::array new_cast_output_defs{&new_cast_output};
+  const std::array new_transpose_input_defs = {&new_cast_output};
+  const std::array new_transpose_output_defs = {cast_output};
 
-  Node& new_cast = graph.AddNode(graph.GenerateNodeName(cast->Name() + "_transformed"),
-                      cast->OpType(),
-                      "Created a new Cast node to interchange Cast and Transpose nodes",
-                      new_cast_input_defs,
-                      new_cast_output_defs,
-                      &cast->GetAttributes(),
-                      cast->Domain());
+  Node& new_cast = graph.AddNode(graph.GenerateNodeName(cast->Name() + "/MatmulTransposeFusion/"),
+                                 cast->OpType(),
+                                 "Created a new Cast node to interchange Cast and Transpose nodes",
+                                 new_cast_input_defs,
+                                 new_cast_output_defs,
+                                 &cast->GetAttributes(),
+                                 cast->Domain());
   new_cast.SetExecutionProviderType(cast->GetExecutionProviderType());
 
   Node& new_transpose = graph.AddNode(graph.GenerateNodeName(transpose->Name() + "_transformed"),
@@ -291,7 +292,7 @@ Status MatmulTransposeFusion::ApplyImpl(Graph& graph, bool& modified, int graph_
   const auto& node_topology_list = graph_viewer.GetNodesInTopologicalOrder();
   std::deque<onnxruntime::NodeIndex> removed_nodes;
 
-  std::unordered_map<NodeArg*, size_t> consumer_count;
+  InlinedHashMap<NodeArg*, size_t> consumer_count;
 
   for (auto node_index : node_topology_list) {
     auto& node = *graph.GetNode(node_index);
@@ -309,6 +310,19 @@ Status MatmulTransposeFusion::ApplyImpl(Graph& graph, bool& modified, int graph_
       continue;
     }
 
+    NodeArg* right_input = node.MutableInputDefs()[1];
+    auto right_type = right_input->TypeAsProto()->tensor_type().elem_type();
+    if (!IsAllowedFusedMatMulDataType(static_cast<ONNX_NAMESPACE::TensorProto_DataType>(right_type))) {
+      continue;
+    }
+
+    if (left_input == right_input) {
+      // If both inputs are the same, we skip the fusion.
+      // Currently, this situation is not handled correctly in the code below.
+      // Otherwise, the model initialization may fail. See https://github.com/microsoft/onnxruntime/issues/24341.
+      continue;
+    }
+
     bool is_trans_left = false;
     bool is_trans_batch_left = false;
     Node* left = nullptr;
@@ -322,12 +336,6 @@ Status MatmulTransposeFusion::ApplyImpl(Graph& graph, bool& modified, int graph_
                                          is_trans_batch_left);
         }
       }
-    }
-
-    NodeArg* right_input = node.MutableInputDefs()[1];
-    auto right_type = right_input->TypeAsProto()->tensor_type().elem_type();
-    if (!IsAllowedFusedMatMulDataType(static_cast<ONNX_NAMESPACE::TensorProto_DataType>(right_type))) {
-      continue;
     }
 
     bool is_trans_right = false;
@@ -358,7 +366,7 @@ Status MatmulTransposeFusion::ApplyImpl(Graph& graph, bool& modified, int graph_
         }
         if (is_trans_batch_right) {
           is_trans_right = is_trans_batch_right = false;
-          right= nullptr;
+          right = nullptr;
         }
       }
     }
@@ -381,10 +389,10 @@ Status MatmulTransposeFusion::ApplyImpl(Graph& graph, bool& modified, int graph_
       right_input = right->MutableInputDefs()[0];
     }
 
-    const std::vector<NodeArg*> input_defs{left_input, right_input};
-    const std::vector<NodeArg*> output_defs{node.MutableOutputDefs()[0]};
+    const std::array input_defs{left_input, right_input};
+    const std::array output_defs{node.MutableOutputDefs()[0]};
 
-    Node& matmul_node = graph.AddNode(graph.GenerateNodeName("MatMul_With_Transpose"),
+    Node& matmul_node = graph.AddNode(graph.GenerateNodeName(node.Name() + "/MatmulTransposeFusion/"),
                                       "FusedMatMul",
                                       "fused MatMul and Transpose ",
                                       input_defs,
@@ -404,6 +412,13 @@ Status MatmulTransposeFusion::ApplyImpl(Graph& graph, bool& modified, int graph_
     matmul_node.AddAttribute("alpha", alpha);
     // Assign provider to this new node. Provider should be same as the provider for old node.
     matmul_node.SetExecutionProviderType(node.GetExecutionProviderType());
+#ifdef USE_ROCM
+    // forward the __backwardpass, if present
+    auto& attrs = node.GetAttributes();
+    if (attrs.count("__backwardpass")) {
+      matmul_node.AddAttribute("__backwardpass", static_cast<int64_t>(attrs.at("__backwardpass").i()));
+    }
+#endif
 
     graph_utils::FinalizeNodeFusion(graph, matmul_node, node);
 

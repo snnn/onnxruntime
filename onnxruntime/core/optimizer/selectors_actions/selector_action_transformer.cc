@@ -3,8 +3,13 @@
 
 #include "core/optimizer/selectors_actions/selector_action_transformer.h"
 
+#include <algorithm>
 #include <cassert>
+#include <iterator>
+#include <string>
+#include <utility>
 
+#include "core/graph/op_identifier_utils.h"
 #include "core/graph/runtime_optimization_record_container.h"
 
 namespace onnxruntime {
@@ -28,9 +33,7 @@ void SelectorActionRegistry::RegisterSelectorAndAction(const std::string& name,
   const Entry& entry = name_to_entry_it->second;
   for (const auto& [op_type, versions] : entry.ops_and_versions) {
     ORT_UNUSED_PARAMETER(versions);
-    const bool inserted_in_op_type_to_entry = op_type_to_entry_.emplace(op_type, &entry).second;
-    ORT_ENFORCE(inserted_in_op_type_to_entry,
-                "Multiple entries for operator is not supported. OpType=", op_type);
+    op_type_to_entry_.emplace(op_type, &entry);
   }
 }
 
@@ -54,18 +57,22 @@ const SelectorActionRegistry::Entry* SelectorActionRegistry::LookUp(const std::s
 }
 
 #if !defined(ORT_MINIMAL_BUILD)
-const SelectorActionRegistry::Entry* SelectorActionRegistry::LookUpByOpType(const std::string& op_type) const {
-  if (const auto it = op_type_to_entry_.find(op_type); it != op_type_to_entry_.end()) {
-    return it->second;
-  }
-  return nullptr;
+auto SelectorActionRegistry::LookUpByOpTypeAndDomain(const std::string& op_type, const std::string& domain) const
+    -> std::vector<gsl::not_null<const Entry*>> {
+  const auto [range_begin, range_end] = op_type_to_entry_.equal_range(OpVersionsMapKey(op_type, domain));
+  std::vector<gsl::not_null<const Entry*>> result{};
+  result.reserve(std::distance(range_begin, range_end));
+  std::transform(range_begin, range_end, std::back_inserter(result),
+                 [](const std::pair<std::string, const Entry*> value) { return value.second; });
+  return result;
 }
 #endif  // !defined(ORT_MINIMAL_BUILD)
 
 SelectorActionTransformer::SelectorActionTransformer(const std::string& name,
                                                      SelectorActionRegistry&& selector_action_registry,
-                                                     const SatApplyContextVariant& apply_context)
-    : GraphTransformer{name},
+                                                     const SatApplyContextVariant& apply_context,
+                                                     const InlinedHashSet<std::string_view>& compatible_execution_providers)
+    : GraphTransformer{name, compatible_execution_providers},
       selector_action_registry_{std::move(selector_action_registry)},
       apply_context_{apply_context} {}
 
@@ -87,42 +94,47 @@ static Status MatchAndProcess(
   Status status = Status::OK();
 
   do {
-    // TODO: for now this just needs to support ONNX ops. If we ever had a transformer that was going to
-    // target non-ONNX ops we'd need to rework a few things to include the op domain in the matches
-    if (node.Domain() != kOnnxDomain) {
-      break;
-    }
+    std::optional<NodesToOptimizeIndices> node_selection_opt{};
+    const SelectorActionRegistry::Entry* selector_action_entry_ptr = nullptr;
 
-    const auto* selector_action_entry = selector_action_registry.LookUpByOpType(node.OpType());
-
-    if (!selector_action_entry) {
-      break;
-    }
-
-    // check the supported versions if specified
-    const auto& versions = selector_action_entry->ops_and_versions.find(node.OpType())->second;
-    if (!versions.empty()) {
-      if (std::find(versions.cbegin(), versions.cend(), node.SinceVersion()) == versions.cend()) {
-        break;
+    const auto selector_action_entries =
+        selector_action_registry.LookUpByOpTypeAndDomain(node.OpType(), node.Domain());
+    std::string key = SelectorActionRegistry::OpVersionsMapKey(node.OpType(), node.Domain());
+    for (const auto& entry : selector_action_entries) {
+      // check the supported versions if specified
+      const auto& versions = entry->ops_and_versions.find(key)->second;
+      if (!versions.empty()) {
+        if (std::find(versions.cbegin(), versions.cend(), node.SinceVersion()) == versions.cend()) {
+          continue;
+        }
       }
-    }
 
-    const auto node_selection_opt = selector_action_entry->selector->Select(graph_viewer, node);
-    if (!node_selection_opt.has_value()) {
+      auto selection = entry->selector->Select(graph_viewer, node);
+      if (!selection.has_value()) {
+        continue;
+      }
+
+      node_selection_opt = std::move(selection);
+      selector_action_entry_ptr = entry.get();
       break;
     }
-    const auto& node_selection = *node_selection_opt;
+
+    if (!selector_action_entry_ptr) {
+      break;
+    }
 
     LOGS(logger, VERBOSE) << "Matched " << node.OpType();
 
-    const auto& action = *selector_action_entry->action;
-    NodesToOptimize node_group(graph, node_selection);
+    const auto& selector_action_entry = *selector_action_entry_ptr;
+    const auto& action = *selector_action_entry.action;
+    const auto& node_selection = *node_selection_opt;
+    const NodesToOptimize node_group(graph, node_selection);
 
     if (save_context) {
       // don't save a runtime optimization again if it already exists
       // this might happen if the transformer is run multiple times, e.g., from a graph transformer manager which may
       //   run its transformers in multiple passes
-      if (graph.RuntimeOptimizations().RecordExists(transformer_name, selector_action_entry->name, node_selection)) {
+      if (graph.RuntimeOptimizations().RecordExists(transformer_name, selector_action_entry.name, node_selection)) {
         break;
       }
 
@@ -132,11 +144,31 @@ static Status MatchAndProcess(
         break;
       }
 
-      graph.MutableRuntimeOptimizations().AddRecord(
-          transformer_name,
-          RuntimeOptimizationRecord{selector_action_entry->name,
-                                    node_selection,
-                                    action_saved_state.produced_nodes});
+      RuntimeOptimizationRecord::ProducedOpIdVector produced_op_ids{};
+      produced_op_ids.reserve(action_saved_state.produced_node_op_schemas.size());
+
+      for (const auto& op_schema : action_saved_state.produced_node_op_schemas) {
+        produced_op_ids.push_back(utils::MakeOpId(*op_schema));
+        if (save_context->record_produced_node_op_schema) {
+          status = save_context->record_produced_node_op_schema(*op_schema);
+          if (!status.IsOK()) {
+            break;
+          }
+        }
+      }
+
+      // handle break out of above for loop on error
+      if (!status.IsOK()) {
+        break;
+      }
+
+      RuntimeOptimizationRecord runtime_optimization_record{selector_action_entry.name,
+                                                            node_selection,
+                                                            std::move(produced_op_ids)};
+
+      graph.MutableRuntimeOptimizations().AddRecord(transformer_name,
+                                                    std::move(runtime_optimization_record));
+
     } else {
       status = action.Run(graph, node_group);
       if (!status.IsOK()) {
@@ -164,8 +196,7 @@ Status SelectorActionTransformer::ApplySelectorsAndActions(
 
     ORT_RETURN_IF_ERROR(Recurse(*node, modified, graph_level, logger));
 
-    // TODO: use GraphTransformer::GetCompatibleExecutionProviders if we need something more flexible
-    if (node->GetExecutionProviderType() == kCpuExecutionProvider) {
+    if (graph_utils::IsSupportedProvider(*node, GetCompatibleExecutionProviders())) {
       ORT_RETURN_IF_ERROR(MatchAndProcess(graph, graph_viewer, *node, modified, logger,
                                           Name(), selector_action_registry_, save_context));
     }
@@ -176,23 +207,22 @@ Status SelectorActionTransformer::ApplySelectorsAndActions(
 
 #endif  // !defined(ORT_MINIMAL_BUILD)
 
-#if !defined(ORT_MINIMAL_BUILD) || defined(ORT_ENABLE_RUNTIME_OPTIMIZATION_IN_MINIMAL_BUILD)
+#if !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
 
-static Status RegisterProducedNodesWithGraph(NodeIndex pre_action_max_num_nodes, NodeIndex post_action_max_num_nodes,
-                                             const RuntimeOptimizationRecord& record,
-                                             Graph& graph) {
+static Status SetOpSinceVersionForProducedNodes(NodeIndex pre_action_max_num_nodes,
+                                                NodeIndex post_action_max_num_nodes,
+                                                const RuntimeOptimizationRecord& record,
+                                                Graph& graph) {
   assert(post_action_max_num_nodes >= pre_action_max_num_nodes);
 
   const auto num_new_node_indices = post_action_max_num_nodes - pre_action_max_num_nodes;
 
-  auto produced_node_it = record.produced_nodes.begin();
-  const auto produced_nodes_end = record.produced_nodes.end();
-
-  std::unordered_map<NodeIndex, HashValue> node_index_to_kernel_def_hash{};
+  auto produced_op_id_it = record.produced_op_ids.begin();
+  const auto produced_op_ids_end = record.produced_op_ids.end();
 
   for (NodeIndex i = 0; i < num_new_node_indices; ++i) {
     const NodeIndex new_node_idx = pre_action_max_num_nodes + i;
-    const auto* new_node = graph.GetNode(new_node_idx);
+    auto* new_node = graph.GetNode(new_node_idx);
 
     // only account for new nodes that still exist
     // an action could add a temporary node and then remove it
@@ -200,18 +230,24 @@ static Status RegisterProducedNodesWithGraph(NodeIndex pre_action_max_num_nodes,
       continue;
     }
 
-    ORT_RETURN_IF(produced_node_it == produced_nodes_end,
+    ORT_RETURN_IF(produced_op_id_it == produced_op_ids_end,
                   "Not enough produced nodes in the runtime optimization record.");
 
-    node_index_to_kernel_def_hash.emplace(new_node_idx, produced_node_it->kernel_def_hash);
+    ORT_RETURN_IF(new_node->Domain() != produced_op_id_it->domain ||
+                      new_node->OpType() != produced_op_id_it->op_type,
+                  "New node op (", new_node->Domain(), ':', new_node->OpType(),
+                  ") does not match produced node op in runtime optimization record (",
+                  produced_op_id_it->domain, ':', produced_op_id_it->op_type, ").");
 
-    ++produced_node_it;
+    assert(new_node->SinceVersion() == -1);
+
+    new_node->SetSinceVersion(produced_op_id_it->since_version);
+
+    ++produced_op_id_it;
   }
 
-  ORT_RETURN_IF(produced_node_it != produced_nodes_end, "Too many produced nodes in the runtime optimization record.");
-
-  graph.MutableRuntimeOptimizationReplayCtx().produced_node_index_to_kernel_def_hash.merge(
-      node_index_to_kernel_def_hash);
+  ORT_RETURN_IF(produced_op_id_it != produced_op_ids_end,
+                "Too many produced nodes in the runtime optimization record.");
 
   return Status::OK();
 }
@@ -224,6 +260,9 @@ Status SelectorActionTransformer::ApplySavedRuntimeOptimizations(
 
   const auto records = graph.MutableRuntimeOptimizations().RemoveRecordsForOptimizer(Name());
   for (const auto& record : records) {
+    LOGS(logger, VERBOSE) << "Applying runtime optimization action " << record.action_id
+                          << " for transformer " << Name();
+
     const auto* selector_action_entry = selector_action_registry_.LookUp(record.action_id);
     if (!selector_action_entry) {
       return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Missing action ", record.action_id, " for transformer ", Name());
@@ -232,38 +271,43 @@ Status SelectorActionTransformer::ApplySavedRuntimeOptimizations(
     NodesToOptimize nodes_to_optimize{graph, record.nodes_to_optimize_indices};
 
     if (!nodes_to_optimize.IsValid()) {
+      LOGS(logger, VERBOSE) << "Nodes to optimize are not valid, skipping action.";
       continue;
     }
 
     // all nodes in the group are still available if IsValid returns true
 
-    const NodeIndex pre_action_max_index = graph.MaxNodeIndex();
+    if (!graph_utils::IsSupportedProvider(nodes_to_optimize.Target(), GetCompatibleExecutionProviders())) {
+      // TODO is it enough to just check the target node?
+      LOGS(logger, VERBOSE) << "Target node is not assigned to a compatible execution provider, skipping action.";
+      continue;
+    }
+
+    const NodeIndex pre_action_num_nodes = graph.MaxNodeIndex();
 
     ORT_RETURN_IF_ERROR(selector_action_entry->action->Run(graph, nodes_to_optimize));
     modified = true;
 
-    const NodeIndex post_action_max_index = graph.MaxNodeIndex();
+    const NodeIndex post_action_num_nodes = graph.MaxNodeIndex();
 
-    ORT_RETURN_IF_ERROR(RegisterProducedNodesWithGraph(pre_action_max_index, post_action_max_index,
-                                                       record, graph));
-
-    ++graph.MutableRuntimeOptimizationReplayCtx().num_replayed_optimizations;
+    ORT_RETURN_IF_ERROR(SetOpSinceVersionForProducedNodes(pre_action_num_nodes, post_action_num_nodes,
+                                                          record, graph));
   }
 
   return Status::OK();
 }
 
-#endif  // !defined(ORT_MINIMAL_BUILD) || defined(ORT_ENABLE_RUNTIME_OPTIMIZATION_IN_MINIMAL_BUILD)
+#endif  // !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
 
 Status SelectorActionTransformer::ApplyImpl(Graph& graph, bool& modified, int graph_level,
                                             const logging::Logger& logger) const {
   if (std::holds_alternative<SatRuntimeOptimizationLoadContext>(apply_context_)) {
-#if !defined(ORT_MINIMAL_BUILD) || defined(ORT_ENABLE_RUNTIME_OPTIMIZATION_IN_MINIMAL_BUILD)
+#if !defined(ORT_MINIMAL_BUILD) || defined(ORT_EXTENDED_MINIMAL_BUILD)
     return ApplySavedRuntimeOptimizations(graph, modified, graph_level, logger);
-#else   // !defined(ORT_MINIMAL_BUILD) || defined(ORT_ENABLE_RUNTIME_OPTIMIZATION_IN_MINIMAL_BUILD)
+#else
     return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL,
                            "Loading runtime optimizations is not enabled in this build.");
-#endif  // !defined(ORT_MINIMAL_BUILD) || defined(ORT_ENABLE_RUNTIME_OPTIMIZATION_IN_MINIMAL_BUILD)
+#endif
   }
 
   assert(std::holds_alternative<SatRuntimeOptimizationSaveContext>(apply_context_) ||
@@ -272,10 +316,10 @@ Status SelectorActionTransformer::ApplyImpl(Graph& graph, bool& modified, int gr
 #if !defined(ORT_MINIMAL_BUILD)
   const auto* save_context = std::get_if<SatRuntimeOptimizationSaveContext>(&apply_context_);
   return ApplySelectorsAndActions(graph, modified, graph_level, logger, save_context);
-#else   // !defined(ORT_MINIMAL_BUILD)
+#else
   return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL,
                          "Running both selectors and actions is not enabled in this build.");
-#endif  // !defined(ORT_MINIMAL_BUILD)
+#endif
 }
 
 }  // namespace onnxruntime

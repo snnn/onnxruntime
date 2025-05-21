@@ -22,7 +22,7 @@ enum AttributeType : int32 {
 
 // Shape
 table Shape {
-dim:[Dimension];
+  dim:[Dimension];
 }
 
 table Dimension {
@@ -61,20 +61,25 @@ enum TensorDataType : int32 {
   COMPLEX64 = 14,
   COMPLEX128 = 15,
   BFLOAT16 = 16,
+  // Float 8 types. See https://onnx.ai/onnx/technical/float8.html.
+  FLOAT8E4M3FN = 17,
+  FLOAT8E4M3FNUZ = 18,
+  FLOAT8E5M2 = 19,
+  FLOAT8E5M2FNUZ = 20,
 }
 
-table TensorTypeAndShape{
+table TensorTypeAndShape {
   elem_type:TensorDataType;
   shape:Shape;
 }
 
-table MapType{
+table MapType {
   key_type:TensorDataType;
-  value_type:onnxruntime.fbs.TypeInfo;
+  value_type:TypeInfo;
 }
 
-table SequenceType{
-  elem_type:onnxruntime.fbs.TypeInfo;
+table SequenceType {
+  elem_type:TypeInfo;
 }
 
 // Node
@@ -108,7 +113,7 @@ table Node {
 
   inputs:[string];
   outputs:[string];
-  attributes:[onnxruntime.fbs.Attribute];
+  attributes:[Attribute];
 
   input_arg_counts:[int32];
   implicit_inputs:[string];
@@ -151,8 +156,13 @@ table Tensor {
 
   raw_data:[uint8];
 
-  // string_data is least used, leave it at the end
+  // string_data is least used
   string_data:[string];
+
+  // offset into external data file to allow data >2GB to be handled. not used for string data.
+  // an external file writer/reader needs to be provided when serializing.
+  // int64 (vs uint64) so we can explicitly set to -1 when not used.
+  external_data_offset:int64 = -1;
 }
 
 table SparseTensor {
@@ -161,7 +171,7 @@ table SparseTensor {
   dims:[int64];
 }
 
-table Attribute{
+table Attribute {
   name:string;
   doc_string:string;
 
@@ -184,7 +194,7 @@ table Attribute{
 
 /// nodes to consider for a runtime optimization
 /// see corresponding type in onnxruntime/core/graph/runtime_optimization_record.h
-table NodesToOptimizeIndices{
+table NodesToOptimizeIndices {
   node_indices:[uint32];
   num_inputs:uint32;
   num_outputs:uint32;
@@ -194,30 +204,32 @@ table NodesToOptimizeIndices{
   num_variadic_outputs:uint32;
 }
 
-table NodeIndexAndKernelDefHash{
+/// deprecated: no longer using kernel def hashes
+table DeprecatedNodeIndexAndKernelDefHash {
   node_index:uint32;
   kernel_def_hash:uint64;
 }
 
 /// a single runtime optimization
 /// see corresponding type in onnxruntime/core/graph/runtime_optimization_record.h
-table RuntimeOptimizationRecord{
+table RuntimeOptimizationRecord {
   action_id:string;
   nodes_to_optimize_indices:NodesToOptimizeIndices;
-  produced_nodes:[NodeIndexAndKernelDefHash];
+  produced_nodes:[DeprecatedNodeIndexAndKernelDefHash] (deprecated);
+  produced_op_ids:[string];
 }
 
-table RuntimeOptimizationRecordContainerEntry{
+table RuntimeOptimizationRecordContainerEntry {
   optimizer_name:string (key);
   runtime_optimization_records:[RuntimeOptimizationRecord];
 }
 
-table RuntimeOptimizations{
+table RuntimeOptimizations {
   /// mapping from optimizer name to [RuntimeOptimizationRecord]
   records:[RuntimeOptimizationRecordContainerEntry];
 }
 
-table Graph{
+table Graph {
   initializers:[Tensor];
 
   node_args:[ValueInfo];
@@ -253,31 +265,60 @@ table Model {
   metadata_props:[StringStringEntry];
 }
 
-table KernelCreateInfos {
+/// deprecated: no longer using kernel def hashes
+table DeprecatedKernelCreateInfos {
   node_indices:[uint32];
   kernel_def_hashes:[uint64];
 }
 
-table SubGraphSessionState {
-  // graph_id can be used to binary search SubGraphSessionState in SessionState.sub_graph_session_states
+/// deprecated: no longer using kernel def hashes
+table DeprecatedSubGraphSessionState {
+  // graph_id can be used to binary search DeprecatedSubGraphSessionState in
+  // DeprecatedSessionState.sub_graph_session_states
   graph_id:string (key);
 
-  session_state:SessionState;
+  session_state:DeprecatedSessionState;
 }
 
-table SessionState {
-  kernels:KernelCreateInfos;
-  sub_graph_session_states:[SubGraphSessionState];
+/// deprecated: no longer using kernel def hashes
+table DeprecatedSessionState {
+  kernels:DeprecatedKernelCreateInfos;
+  sub_graph_session_states:[DeprecatedSubGraphSessionState];
+}
+
+enum ArgType : int8 {
+  INPUT = 0,
+  OUTPUT = 1,
+}
+
+table ArgTypeAndIndex {
+  arg_type:ArgType;
+  index:uint32;
+}
+
+table KernelTypeStrArgsEntry {
+  kernel_type_str:string (key);
+  args:[ArgTypeAndIndex];
+}
+
+table OpIdKernelTypeStrArgsEntry {
+  op_id:string (key);
+  kernel_type_str_args:[KernelTypeStrArgsEntry];
+}
+
+table KernelTypeStrResolver {
+  op_kernel_type_str_args:[OpIdKernelTypeStrArgsEntry];
 }
 
 table InferenceSession {
   // This is the ORT format model version
   // The version number is defined as kOrtModelVersion in <repo root>/onnxruntime/core/flatbuffers/ort_format_version.h
-  // Please update it when there is a change to this schema which will break the compatibilities
   ort_version:string;
 
   model:Model;
-  session_state:SessionState;
+  session_state:DeprecatedSessionState (deprecated);
+
+  kernel_type_str_resolver:KernelTypeStrResolver;
 }
 
 root_type InferenceSession;

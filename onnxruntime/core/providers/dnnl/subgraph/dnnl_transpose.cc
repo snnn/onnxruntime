@@ -13,7 +13,7 @@ namespace ort_dnnl {
 DnnlTranspose::DnnlTranspose() {}
 
 /*
-Transpose: 
+Transpose:
   Inputs:
     0) DATA - Input Tensor
   Outputs:
@@ -27,11 +27,10 @@ Attributes (perm) - A list of integers. By default, reverse the dimensions,
                     otherwise permute the axes according to the values given.
 */
 void DnnlTranspose::CreatePrimitive(DnnlSubgraphPrimitive& sp, DnnlNode& node) {
-
   auto dnnl_engine = sp.GetEngine();
 
   auto data_mem = sp.GetMemory(node.Input(IN_DATA));
-  auto data_dims = data_mem.get_desc().dims();
+  auto data_dims = data_mem.get_desc().get_dims();
   auto ndata_dims = data_dims.size();
 
   auto perm = GetPerm(node);
@@ -45,7 +44,7 @@ void DnnlTranspose::CreatePrimitive(DnnlSubgraphPrimitive& sp, DnnlNode& node) {
   dnnl::memory::dims transposed_dims(ndata_dims, 0);
   dnnl::memory::dims strides(ndata_dims, 0);
   dnnl::memory::dim total_stride = 1;
-  for (int i = (int)ndata_dims - 1 ; i >= 0; i--) {
+  for (int i = (int)ndata_dims - 1; i >= 0; i--) {
     transposed_dims[i] = data_dims[perm[i]];
     strides[perm[i]] = total_stride;
     total_stride *= data_dims[perm[i]];
@@ -57,7 +56,8 @@ void DnnlTranspose::CreatePrimitive(DnnlSubgraphPrimitive& sp, DnnlNode& node) {
     strides_inverse.push_back(strides[ndata_dims - i - 1]);
   }
 
-  // Memory descriptor describes the memory reorder but will not have the correct output dimentions or the correct dnnl::memory::format
+  // Memory descriptor describes the memory reorder but will not have the correct output dimensions
+  // or the correct dnnl::memory::format
   dnnl::memory::desc intermediate_md = dnnl::memory::desc(data_dims, node.Input(IN_DATA).Type(), strides);
   dnnl::memory intermediate_mem = dnnl::memory(intermediate_md, dnnl_engine);
 
@@ -66,7 +66,7 @@ void DnnlTranspose::CreatePrimitive(DnnlSubgraphPrimitive& sp, DnnlNode& node) {
                                        {DNNL_ARG_TO, intermediate_mem}});
 
   // The reorder from above will get the memory in the right order. The next few lines will create a memory and memory descriptor
-  // that will have the correct dimentions and correct memory::format
+  // that will have the correct dimensions and correct memory::format
   dnnl::memory::desc transposed_md = dnnl::memory::desc(transposed_dims, node.Input(IN_DATA).Type(), sp.GetDnnlFormat(data_dims.size()));
   dnnl::memory transposed_mem = dnnl::memory(transposed_md, dnnl_engine, nullptr);
   void* handle = intermediate_mem.get_data_handle();

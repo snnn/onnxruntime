@@ -34,17 +34,18 @@ ONNX_OPERATOR_KERNEL_EX(
     ConvInteger);
 
 Status ConvInteger::Compute(OpKernelContext* context) const {
-  size_t num_inputs = OpKernel::Node().InputDefs().size();
+  const auto input_defs = Node().InputDefs();
+  size_t num_inputs = input_defs.size();
   const auto* X = context->Input<Tensor>(0);
   const auto* W = context->Input<Tensor>(1);
   uint8_t input_offset = 0;
   uint8_t filter_offset = 0;
-  if (num_inputs >= 3) {
+  if (num_inputs >= 3 && input_defs[2]->Exists()) {
     const auto* X_Zero_Point = context->Input<Tensor>(2);
     ORT_ENFORCE(IsScalarOr1ElementVector(X_Zero_Point), "Must be a scalar or 1D tensor or size 1.");
     input_offset = *(X_Zero_Point->Data<uint8_t>());
   }
-  if (num_inputs >= 4) {
+  if (num_inputs >= 4 && input_defs[3]->Exists()) {
     const auto* W_Zero_Point = context->Input<Tensor>(3);
     ORT_ENFORCE(IsScalarOr1ElementVector(W_Zero_Point), "Non per-tensor quantization is not supported now.");
     filter_offset = *(W_Zero_Point->Data<uint8_t>());
@@ -73,7 +74,7 @@ Status ConvInteger::Compute(OpKernelContext* context) const {
 
   TensorShapeVector Y_dims({N, M});
   TensorShape input_shape = X->Shape().Slice(2);
-  ORT_RETURN_IF_ERROR(conv_attrs_.InferOutputShape(input_shape, kernel_shape, strides, dilations, pads, Y_dims));
+  ORT_RETURN_IF_ERROR(conv_attrs_.InferPadsAndOutputShape(input_shape, kernel_shape, strides, dilations, pads, Y_dims));
   Tensor* Y = context->Output(0, TensorShape(Y_dims));
   TensorShape output_shape = Y->Shape().Slice(2);
 
@@ -102,16 +103,16 @@ Status ConvInteger::Compute(OpKernelContext* context) const {
     ORT_RETURN_IF_ERROR(context->GetTempSpaceAllocator(&alloc));
 
     auto* col_data = alloc->Alloc(SafeInt<size_t>(sizeof(uint8_t)) * col_buffer_size);
-    col_buffer = BufferUniquePtr(col_data, BufferDeleter(alloc));
+    col_buffer = BufferUniquePtr(col_data, BufferDeleter(std::move(alloc)));
   }
 
   auto* col_buffer_data = static_cast<uint8_t*>(col_buffer.get());
 
   concurrency::ThreadPool* thread_pool = context->GetOperatorThreadPool();
 
-  const auto* Xdata = X->template Data<uint8_t>();
-  const auto* Wdata = W->template Data<uint8_t>();
-  auto* Ydata = Y->template MutableData<int32_t>();
+  const auto* Xdata = X->Data<uint8_t>();
+  const auto* Wdata = W->Data<uint8_t>();
+  auto* Ydata = Y->MutableData<int32_t>();
 
   for (int image_id = 0; image_id < N; ++image_id) {
     for (int group_id = 0; group_id < conv_attrs_.group; ++group_id) {
@@ -155,7 +156,7 @@ Status ConvInteger::Compute(OpKernelContext* context) const {
       gemm_shape.M = static_cast<size_t>(M / conv_attrs_.group);
       gemm_shape.N = static_cast<size_t>(output_image_size);
       gemm_shape.K = static_cast<size_t>(kernel_dim);
-      
+
       MLAS_GEMM_QUANT_DATA_PARAMS gemm_params;
       gemm_params.A = Wdata + group_id * W_offset;
       gemm_params.lda = static_cast<size_t>(kernel_dim);

@@ -28,12 +28,11 @@ armnn::IRuntimePtr BatchNorm<T>::run = armnn::IRuntimePtr(nullptr, nullptr);
 
 template <typename T>
 Status BatchNorm<T>::Compute(OpKernelContext* context) const {
-
   const Tensor* X = context->Input<Tensor>(0);
-  const Tensor* S = context->Input<Tensor>(1);//scale
+  const Tensor* S = context->Input<Tensor>(1);  // scale
   const Tensor* B = context->Input<Tensor>(2);
-  const Tensor* M = context->Input<Tensor>(3);//mean
-  const Tensor* V = context->Input<Tensor>(4);//var
+  const Tensor* M = context->Input<Tensor>(3);  // mean
+  const Tensor* V = context->Input<Tensor>(4);  // var
 
   ORT_RETURN_IF_ERROR(BatchNormHelper::ValidateInputs(X, S, B, M, V));
 
@@ -42,16 +41,15 @@ Status BatchNorm<T>::Compute(OpKernelContext* context) const {
   LOGS_DEFAULT(VERBOSE) << "params " << S->Shape().ToString().c_str();
   LOGS_DEFAULT(VERBOSE) << std::endl;
 
-  const T* x_data = X->template Data<T>();
+  const T* x_data = X->Data<T>();
 
   Tensor* Y = context->Output(0, X->Shape());
 
-  T* y_data = Y->template MutableData<T>();
+  T* y_data = Y->MutableData<T>();
 
   armnn::NetworkId* pNetworkId;
   BatchNormLayersIterator it = BatchNorm::batchNormLayers.find((OpKernel*)this);
   if (it == BatchNorm::batchNormLayers.end()) {
-    
     armnn::NetworkId networkId;
     armnn::INetworkPtr myNetwork = armnn::INetwork::Create();
 
@@ -60,12 +58,12 @@ Status BatchNorm<T>::Compute(OpKernelContext* context) const {
 
     armnn::BatchNormalizationDescriptor desc;
     desc.m_Eps = epsilon_;
-    desc.m_DataLayout  = armnn::DataLayout::NCHW;
+    desc.m_DataLayout = armnn::DataLayout::NCHW;
 
-    const T* mean_data = M->template Data<T>();
-    const T* var_data = V->template Data<T>();
-    const T* b_data = B->template Data<T>();
-    const T* scale_data = S->template Data<T>();
+    const T* mean_data = M->Data<T>();
+    const T* var_data = V->Data<T>();
+    const T* b_data = B->Data<T>();
+    const T* scale_data = S->Data<T>();
 
     armnn::TensorInfo meanDesc(ArmNNTensorShape(M->Shape()), armnn::DataType::Float32);
     armnn::ConstTensor mean(meanDesc, mean_data);
@@ -78,20 +76,20 @@ Status BatchNorm<T>::Compute(OpKernelContext* context) const {
 
     armnn::IConnectableLayer* layer = myNetwork->AddBatchNormalizationLayer(desc, mean, variance, beta, gamma, "batchnorm_armnn");
 
-    armnn::IConnectableLayer *InputLayer  = myNetwork->AddInputLayer(0);
-    armnn::IConnectableLayer *OutputLayer = myNetwork->AddOutputLayer(0);
+    armnn::IConnectableLayer* InputLayer = myNetwork->AddInputLayer(0);
+    armnn::IConnectableLayer* OutputLayer = myNetwork->AddOutputLayer(0);
 
     InputLayer->GetOutputSlot(0).Connect(layer->GetInputSlot(0));
     layer->GetOutputSlot(0).Connect(OutputLayer->GetInputSlot(0));
 
-    //Set the tensors in the network.
+    // Set the tensors in the network.
     armnn::TensorInfo inputTensorInfo(inputShape, armnn::DataType::Float32);
     InputLayer->GetOutputSlot(0).SetTensorInfo(inputTensorInfo);
 
     armnn::TensorInfo outputTensorInfo(outputShape, armnn::DataType::Float32);
     layer->GetOutputSlot(0).SetTensorInfo(outputTensorInfo);
 
-    // Optimise ArmNN network
+    // Optimize ArmNN network
     armnn::IOptimizedNetworkPtr optNet = armnn::Optimize(*myNetwork, {armnn::Compute::CpuAcc}, BatchNorm::run->GetDeviceSpec());
 
     if (optNet == nullptr) {
@@ -125,11 +123,11 @@ ONNX_OPERATOR_VERSIONED_KERNEL_EX(
     7, 9,
     kArmNNExecutionProvider,
     KernelDefBuilder()
-      .TypeConstraint("X", DataTypeImpl::GetTensorType<float>())
-      .TypeConstraint("scale", DataTypeImpl::GetTensorType<float>())
-      .TypeConstraint("B", DataTypeImpl::GetTensorType<float>())
-      .TypeConstraint("mean", DataTypeImpl::GetTensorType<float>())
-      .TypeConstraint("var", DataTypeImpl::GetTensorType<float>()),
+        .TypeConstraint("X", DataTypeImpl::GetTensorType<float>())
+        .TypeConstraint("scale", DataTypeImpl::GetTensorType<float>())
+        .TypeConstraint("B", DataTypeImpl::GetTensorType<float>())
+        .TypeConstraint("mean", DataTypeImpl::GetTensorType<float>())
+        .TypeConstraint("var", DataTypeImpl::GetTensorType<float>()),
     BatchNorm<float>);
 
 }  // namespace armnn_ep

@@ -1,48 +1,67 @@
-// Copyright (c) Xilinx Inc. All rights reserved.
+// Copyright (c) 2023 Advanced Micro Devices, Inc. All rights reserved.
 // Licensed under the MIT License.
 
 #pragma once
 
+// Standard headers/libs.
 #include <ctime>
-#include "core/framework/execution_provider.h"
-#include "core/platform/ort_mutex.h"
+#include <vector>
+#include <memory>
+#include <set>
+#include <string>
 
+#include "core/providers/shared_library/provider_api.h"
+#include "core/session/onnxruntime_c_api.h"
+
+// we cannot include vaip/vaip.hpp here because header file referred by
+// onnxruntime_pybind_state_common.cc
+namespace vaip_core {
+template <typename T>
+class DllSafe;
+class ExecutionProvider;
+}  // namespace vaip_core
 namespace onnxruntime {
-
-// Information needed to construct execution providers.
-struct VitisAIExecutionProviderInfo {
-  int device_id{0};
-  std::string backend_type;
-  std::string export_runtime_module;
-  std::string load_runtime_module;
-};
-
 // Logical device representation.
 class VitisAIExecutionProvider : public IExecutionProvider {
  public:
-  explicit VitisAIExecutionProvider(const VitisAIExecutionProviderInfo& info);
+  explicit VitisAIExecutionProvider(const ProviderOptions& info);
   ~VitisAIExecutionProvider() = default;
 
-  std::vector<std::unique_ptr<ComputeCapability>>
-  GetCapability(const onnxruntime::GraphViewer& graph,
-                const std::vector<const KernelRegistry*>& /*kernel_registries*/) const override;
+  std::vector<std::unique_ptr<ComputeCapability>> GetCapability(const onnxruntime::GraphViewer& graph_viewer,
+                                                                const IKernelLookup& /*kernel_lookup*/,
+                                                                const GraphOptimizerRegistry& /* graph_optimizer_registry */,
+                                                                IResourceAccountant* /* resource_accountant */) const override;
 
-  int GetDeviceId() const { return device_id_; }
-
-  common::Status Compile(const std::vector<onnxruntime::Node*>& fused_nodes,
+  int GetDeviceId() const { return 0; }
+  common::Status OnRunStart(const onnxruntime::RunOptions& /*run_options*/) override;
+  common::Status Compile(const std::vector<FusedNodeAndGraph>& fused_nodes_and_graphs,
                          std::vector<NodeComputeInfo>& node_compute_funcs) override;
+  std::shared_ptr<KernelRegistry> GetKernelRegistry() const override;
+
+  std::unique_ptr<profiling::EpProfiler> GetProfiler() override;
+
+  // This method is called after both `GetComputeCapabilityOps()` and `Compile()`.
+  // This timing is required to work with both compliation-based EPs and non-compilation-based EPs.
+  const InlinedVector<const Node*> GetEpContextNodes() const override;
+  virtual common::Status SetEpDynamicOptions(gsl::span<const char* const> /*keys*/,
+                                             gsl::span<const char* const> /*values*/) override;
 
  private:
-  // The Vitis AI DPU target
-  std::string backend_type_;
-  // Device ID (Unused for now)
-  int device_id_;
-  // If not empty, the path to the file where the PyXIR runtime module
-  //	should be exported to (used for cross compilation)
-  std::string export_runtime_module_;
-  // If not empty, the path to the file where the PyXIR runtime module
-  //	should be loaded from
-  std::string load_runtime_module_;
+  using my_ep_t = vaip_core::DllSafe<std::vector<std::unique_ptr<vaip_core::ExecutionProvider>>>;
+  using my_ep_uptr_t = std::shared_ptr<my_ep_t>;
+  // we have to hide the implementation by forward declaration.
+  mutable my_ep_uptr_t execution_providers_;
+  ProviderOptions info_;
+  std::vector<OrtCustomOpDomain*> custom_op_domains_;
+  std::shared_ptr<KernelRegistry> registry_;
+  // EP context related.
+  bool ep_ctx_enabled_ = false;
+  bool ep_ctx_embed_mode_ = false;
+  std::string ep_ctx_model_path_cfg_{""};
+  mutable PathString ep_ctx_model_file_loc_{};
+  // It might need to be called before loading
+  // the EP context model that is compiled AOT/offline.
+  void LoadEPContexModelFromFile() const;
 };
 
 }  // namespace onnxruntime

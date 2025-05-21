@@ -7,6 +7,7 @@
 
 #include "attention_wrapper.h"
 
+#include "core/common/narrow.h"
 #include "core/framework/op_kernel.h"
 #include "core/providers/cpu/rnn/rnn_helpers.h"
 
@@ -18,7 +19,7 @@ using onnxruntime::rnn::detail::Direction;
 using onnxruntime::rnn::detail::MakeDirection;
 
 // The class represents DeepCPU implementation of a long short term memory (LSTM) plus a Bahdanau Attention wraper.
-// The equivilent python usage could be checked int the corresponding op test directory, attention_lstm_data_gen.py.
+// The equivalent python usage could be checked int the corresponding op test directory, attention_lstm_data_gen.py.
 // Also please note that detail implementation re-used lot of code from current ONNXRuntime LSTM operator, refactor
 // is needed in future if this is become part of ONNX.
 class DeepCpuAttnLstmOp final : public OpKernel {
@@ -30,7 +31,7 @@ class DeepCpuAttnLstmOp final : public OpKernel {
 
     int64_t int64_value;
     ORT_ENFORCE(info.GetAttr("hidden_size", &int64_value).IsOK() && int64_value > 0);
-    hidden_size_ = gsl::narrow<int>(int64_value);
+    hidden_size_ = narrow<int>(int64_value);
 
     // optional attributes
     std::vector<std::string> activation_func_names = info.GetAttrsOrDefault<std::string>("activations");

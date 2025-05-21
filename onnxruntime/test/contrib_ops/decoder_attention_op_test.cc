@@ -31,16 +31,15 @@ static void RunAttentionTest(
     const std::vector<float>* new_value_cache = nullptr,
     const std::vector<float>* key_cache = nullptr,
     const std::vector<float>* value_cache = nullptr,
-    const std::initializer_list<bool>* key_padding_mask_data = nullptr,
-    bool use_float16 = false
-) {
-  int min_cuda_architecture = use_float16 ? 530 : 0;
-  bool enable_cuda = HasCudaEnvironment(min_cuda_architecture);
+    const std::initializer_list<bool>* key_padding_mask_data = nullptr) {
+  bool enable_cuda = HasCudaEnvironment(0);
+  bool enable_rocm = (nullptr != DefaultRocmExecutionProvider().get());
   bool enable_cpu = false;
 
-  if (enable_cpu || enable_cuda) {
+  if (enable_cpu || enable_cuda || enable_rocm) {
     OpTester tester("DecoderAttention", 1, onnxruntime::kMSDomain);
     tester.AddAttribute<int64_t>("num_heads", static_cast<int64_t>(num_heads));
+    tester.AddAttribute<float>("mask_filter_value", static_cast<float>(-10000.0f));
 
     int head_size = hidden_size / num_heads;
     std::vector<int64_t> query_dims = {sequence_length, batch_size, hidden_size};
@@ -50,7 +49,7 @@ static void RunAttentionTest(
     std::vector<int64_t> bias_dims = {3 * hidden_size};
     std::vector<int64_t> input_cache_dims = {batch_size, num_heads, input_cache_sen_len, head_size};
 
-    std::vector<int64_t> output_dims = {sequence_length, batch_size, hidden_size};
+    const std::vector<int64_t> output_dims = {sequence_length, batch_size, hidden_size};
 
     tester.AddInput<float>("query", query_dims, query_data);
     tester.AddInput<float>("key", key_dims, key_data);
@@ -98,15 +97,18 @@ static void RunAttentionTest(
       tester.AddOutput<float>("new_key_cache", output_cache_dims, *new_key_cache);
       tester.AddOutput<float>("new_value_cache", output_cache_dims, *new_value_cache);
     }
+    tester.SetOutputTolerance(0.001f, 0.001f);
 
+    std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
     if (enable_cuda) {
-      std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
       execution_providers.push_back(DefaultCudaExecutionProvider());
-      tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
     }
+    if (enable_rocm) {
+      execution_providers.push_back(DefaultRocmExecutionProvider());
+    }
+    tester.Run(OpTester::ExpectResult::kExpectSuccess, "", {}, nullptr, &execution_providers);
   }
 }
-
 
 TEST(DecoderAttentionTest, SelfAttentionNoStateNoCache) {
   int batch_size = 1;
@@ -138,10 +140,10 @@ TEST(DecoderAttentionTest, SelfAttentionNoStateNoCache) {
       3.1495983600616455f, 0.10843668878078461f, 4.25f, 5.6499996185302734f,
       3.9696791172027588f, 0.073143675923347473f, 4.2499995231628418f, 5.6499991416931152f};
 
-  //self-attn without cache
+  // self-attn without cache
   RunAttentionTest(input_data, input_data, q_weight_data, kv_weight_data, bias_data, output_data,
                    batch_size, sequence_length, kv_sequence_length, 0, hidden_size, number_of_heads,
-                   /*static_kv*/false, /*use_past*/false, /*has_layer_state*/false, /*has_key_padding_mask*/false);
+                   /*static_kv*/ false, /*use_past*/ false, /*has_layer_state*/ false, /*has_key_padding_mask*/ false);
 }
 
 TEST(DecoderAttentionTest, CrossAttentionNoStateNoCache) {
@@ -174,10 +176,10 @@ TEST(DecoderAttentionTest, CrossAttentionNoStateNoCache) {
       3.1495983600616455f, 0.10843668878078461f, 4.25f, 5.6499996185302734f,
       3.9696791172027588f, 0.073143675923347473f, 4.2499995231628418f, 5.6499991416931152f};
 
-  //cross-attn without cache
+  // cross-attn without cache
   RunAttentionTest(input_data, input_data, q_weight_data, kv_weight_data, bias_data, output_data,
                    batch_size, sequence_length, kv_sequence_length, 0, hidden_size, number_of_heads,
-                   /*static_kv*/true, /*use_past*/false, /*has_layer_state*/false, /*has_key_padding_mask*/false);
+                   /*static_kv*/ true, /*use_past*/ false, /*has_layer_state*/ false, /*has_key_padding_mask*/ false);
 }
 
 TEST(DecoderAttentionTest, SelfAttentionNoStateOutputCache) {
@@ -216,10 +218,10 @@ TEST(DecoderAttentionTest, SelfAttentionNoStateOutputCache) {
   std::vector<float> new_value_cache = {
       8.6900f, -0.1300f, -4.0900f, 0.4200f, 4.2500f, 5.6500f, -0.1100f, 0.5700f};
 
-  //self-attn without cache
+  // self-attn without cache
   RunAttentionTest(input_data, input_data, q_weight_data, kv_weight_data, bias_data, output_data,
                    batch_size, sequence_length, kv_sequence_length, 0, hidden_size, number_of_heads,
-                   /*static_kv*/false, /*use_past*/false, /*has_layer_state*/true, /*has_key_padding_mask*/false,
+                   /*static_kv*/ false, /*use_past*/ false, /*has_layer_state*/ true, /*has_key_padding_mask*/ false,
                    &new_key_cache, &new_value_cache);
 }
 
@@ -259,10 +261,10 @@ TEST(DecoderAttentionTest, CrossAttentionNoStateOutputCache) {
   std::vector<float> new_value_cache = {
       8.6900f, -0.1300f, -4.0900f, 0.4200f, 4.2500f, 5.6500f, -0.1100f, 0.5700f};
 
-  //self-attn without cache
+  // self-attn without cache
   RunAttentionTest(input_data, input_data, q_weight_data, kv_weight_data, bias_data, output_data,
                    batch_size, sequence_length, kv_sequence_length, 0, hidden_size, number_of_heads,
-                   /*static_kv*/true, /*use_past*/false, /*has_layer_state*/true, /*has_key_padding_mask*/false,
+                   /*static_kv*/ true, /*use_past*/ false, /*has_layer_state*/ true, /*has_key_padding_mask*/ false,
                    &new_key_cache, &new_value_cache);
 }
 
@@ -311,10 +313,10 @@ TEST(DecoderAttentionTest, SelfAttentionWithCache) {
       0.0f, 0.0f, 0.0f, 0.0f, 8.6900f, -0.1300f, -4.0900f, 0.4200f,
       0.0f, 0.0f, 0.0f, 0.0f, 4.2500f, 5.6500f, -0.1100f, 0.5700f};
 
-  //self-attn without cache
+  // self-attn without cache
   RunAttentionTest(input_data, input_data, q_weight_data, kv_weight_data, bias_data, output_data,
                    batch_size, sequence_length, kv_sequence_length, input_cache_sen_len, hidden_size, number_of_heads,
-                   /*static_kv*/false, /*use_past*/true, /*has_layer_state*/true, /*has_key_padding_mask*/false,
+                   /*static_kv*/ false, /*use_past*/ true, /*has_layer_state*/ true, /*has_key_padding_mask*/ false,
                    &new_key_cache, &new_value_cache, &key_cache, &value_cache);
 }
 
@@ -361,10 +363,10 @@ TEST(DecoderAttentionTest, CrossAttentionWithCache) {
   std::vector<float> new_value_cache = {
       8.6900f, -0.1300f, -4.0900f, 0.4200f, 4.2500f, 5.6500f, -0.1100f, 0.5700f};
 
-  //self-attn without cache
+  // self-attn without cache
   RunAttentionTest(input_data, input_data, q_weight_data, kv_weight_data, bias_data, output_data,
                    batch_size, sequence_length, kv_sequence_length, input_cache_sen_len, hidden_size, number_of_heads,
-                   /*static_kv*/true, /*use_past*/true, /*has_layer_state*/true, /*has_key_padding_mask*/false,
+                   /*static_kv*/ true, /*use_past*/ true, /*has_layer_state*/ true, /*has_key_padding_mask*/ false,
                    &new_key_cache, &new_value_cache, &key_cache, &value_cache);
 }
 
@@ -400,13 +402,12 @@ TEST(DecoderAttentionTest, SelfAttentionNoStateNoCachePaddingMask) {
 
   std::initializer_list<bool> key_padding_mask_data = {false, false};
 
-  //self-attn without cache
+  // self-attn without cache
   RunAttentionTest(input_data, input_data, q_weight_data, kv_weight_data, bias_data, output_data,
                    batch_size, sequence_length, kv_sequence_length, 0, hidden_size, number_of_heads,
-                   /*static_kv*/false, /*use_past*/false, /*has_layer_state*/false, /*has_key_padding_mask*/true,
+                   /*static_kv*/ false, /*use_past*/ false, /*has_layer_state*/ false, /*has_key_padding_mask*/ true,
                    nullptr, nullptr, nullptr, nullptr, &key_padding_mask_data);
 }
-
 
 }  // namespace test
 }  // namespace onnxruntime

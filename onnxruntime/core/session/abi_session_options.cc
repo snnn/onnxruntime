@@ -1,15 +1,18 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include <cassert>
+#include <cstring>
+#include <sstream>
+
+#include "core/common/inlined_containers.h"
+#include "core/framework/error_code_helper.h"
 #include "core/graph/onnx_protobuf.h"
-#include "core/common/gsl_suppress.h"
+#include "core/session/abi_session_options_impl.h"
+#include "core/session/inference_session.h"
 #include "core/session/onnxruntime_c_api.h"
 #include "core/session/ort_apis.h"
-#include "core/framework/error_code_helper.h"
-#include <cstring>
-#include <cassert>
-#include "core/session/inference_session.h"
-#include "abi_session_options_impl.h"
+#include "core/session/utils.h"
 
 OrtSessionOptions::~OrtSessionOptions() = default;
 
@@ -17,11 +20,73 @@ OrtSessionOptions& OrtSessionOptions::operator=(const OrtSessionOptions&) {
   ORT_THROW("not implemented");
 }
 OrtSessionOptions::OrtSessionOptions(const OrtSessionOptions& other)
-    : value(other.value), provider_factories(other.provider_factories) {
+    : value(other.value), custom_op_domains_(other.custom_op_domains_), provider_factories(other.provider_factories) {
 }
+
+const onnxruntime::ConfigOptions& OrtSessionOptions::GetConfigOptions() const noexcept {
+  return value.config_options;
+}
+
+onnxruntime::Status OrtSessionOptions::AddProviderOptionsToConfigOptions(
+    const std::unordered_map<std::string, std::string>& provider_options, const char* provider_name) {
+  // Add provider options to the session config options.
+  // Use a new key with the format: "ep.<lowercase_provider_name>.<PROVIDER_OPTION_KEY>"
+  auto key_prefix = GetProviderOptionPrefix(provider_name);
+  for (const auto& [ep_key, ep_value] : provider_options) {
+    const std::string new_key = key_prefix + ep_key;
+    ORT_RETURN_IF_ERROR(value.config_options.AddConfigEntry(new_key.c_str(), ep_value.c_str()));
+  }
+  return Status::OK();
+}
+
+// static
+std::string OrtSessionOptions::GetProviderOptionPrefix(const char* provider_name) {
+  std::string key_prefix = "ep.";
+  key_prefix += onnxruntime::utils::GetLowercaseString(provider_name);
+  key_prefix += ".";
+
+  return key_prefix;
+}
+
+#if !defined(ORT_MINIMAL_BUILD) || defined(ORT_MINIMAL_BUILD_CUSTOM_OPS)
+onnxruntime::Status OrtSessionOptions::RegisterCustomOpsLibrary(onnxruntime::PathString library_name) {
+  const auto& platform_env = onnxruntime::Env::Default();
+  void* library_handle = nullptr;
+
+  ORT_RETURN_IF_ERROR(platform_env.LoadDynamicLibrary(library_name, false, &library_handle));
+  if (!library_handle) {
+    return ORT_MAKE_STATUS(ONNXRUNTIME, FAIL, "Failed to load dynamic library ",
+                           onnxruntime::PathToUTF8String(library_name));
+  }
+
+  OrtStatus*(ORT_API_CALL * RegisterCustomOps)(OrtSessionOptions * options, const OrtApiBase* api) = nullptr;
+  ORT_RETURN_IF_ERROR(platform_env.GetSymbolFromLibrary(library_handle, "RegisterCustomOps",
+                                                        (void**)&RegisterCustomOps));
+
+  // Call the exported RegisterCustomOps function and store the return value in a unique_ptr.
+  const std::unique_ptr<OrtStatus, decltype(&OrtApis::ReleaseStatus)> status(RegisterCustomOps(this, OrtGetApiBase()),
+                                                                             OrtApis::ReleaseStatus);
+
+  if (status) {  // A non-nullptr status indicates an error registering custom ops.
+    auto unload_status = platform_env.UnloadDynamicLibrary(library_handle);
+    if (!unload_status.IsOK()) {
+      LOGS_DEFAULT(WARNING) << "Failed to unload handle for dynamic library "
+                            << onnxruntime::PathToUTF8String(library_name) << ": " << unload_status;
+    }
+
+    return onnxruntime::ToStatus(status.get());
+  }
+
+  // The internal onnxruntime::SessionOptions will manage the lifetime of library handles.
+  this->value.AddCustomOpLibraryHandle(std::move(library_name), library_handle);
+
+  return onnxruntime::Status::OK();
+}
+#endif  // !defined(ORT_MINIMAL_BUILD) || defined(ORT_MINIMAL_BUILD_CUSTOM_OPS)
 
 ORT_API_STATUS_IMPL(OrtApis::CreateSessionOptions, OrtSessionOptions** out) {
   API_IMPL_BEGIN
+  GSL_SUPPRESS(r.11)
   *out = new OrtSessionOptions();
   return nullptr;
   API_IMPL_END
@@ -33,6 +98,7 @@ ORT_API(void, OrtApis::ReleaseSessionOptions, _Frees_ptr_opt_ OrtSessionOptions*
 
 ORT_API_STATUS_IMPL(OrtApis::CloneSessionOptions, const OrtSessionOptions* input, OrtSessionOptions** out) {
   API_IMPL_BEGIN
+  GSL_SUPPRESS(r.11)
   *out = new OrtSessionOptions(*input);
   return nullptr;
   API_IMPL_END
@@ -100,6 +166,14 @@ ORT_API_STATUS_IMPL(OrtApis::DisableCpuMemArena, _In_ OrtSessionOptions* options
 ///< logger id to use for session output
 ORT_API_STATUS_IMPL(OrtApis::SetSessionLogId, _In_ OrtSessionOptions* options, const char* logid) {
   options->value.session_logid = logid;
+  return nullptr;
+}
+
+///< logging function and optional logging param to use for session output
+ORT_API_STATUS_IMPL(OrtApis::SetUserLoggingFunction, _In_ OrtSessionOptions* options,
+                    _In_ OrtLoggingFunction user_logging_function, _In_opt_ void* user_logging_param) {
+  options->value.user_logging_function = user_logging_function;
+  options->value.user_logging_param = user_logging_param;
   return nullptr;
 }
 
@@ -175,11 +249,150 @@ ORT_API_STATUS_IMPL(OrtApis::AddSessionConfigEntry, _Inout_ OrtSessionOptions* o
   return onnxruntime::ToOrtStatus(options->value.config_options.AddConfigEntry(config_key, config_value));
 }
 
+ORT_API_STATUS_IMPL(OrtApis::HasSessionConfigEntry, _In_ const OrtSessionOptions* options,
+                    _In_z_ const char* config_key, _Out_ int* out) {
+  API_IMPL_BEGIN
+  auto value_opt = options->value.config_options.GetConfigEntry(config_key);
+  *out = static_cast<int>(value_opt.has_value());
+  return nullptr;
+  API_IMPL_END
+}
+
+ORT_API_STATUS_IMPL(OrtApis::GetSessionConfigEntry, _In_ const OrtSessionOptions* options,
+                    _In_z_ const char* config_key, _Out_ char* config_value, _Inout_ size_t* size) {
+  API_IMPL_BEGIN
+  auto value_opt = options->value.config_options.GetConfigEntry(config_key);
+
+  if (!value_opt) {
+    std::ostringstream err_msg;
+    err_msg << "Session config entry '" << config_key << "' was not found.";
+    return OrtApis::CreateStatus(ORT_INVALID_ARGUMENT, err_msg.str().c_str());
+  }
+
+  auto status = CopyStringToOutputArg(*value_opt, "Output buffer is not large enough for session config entry", config_value,
+                                      size);
+
+  return onnxruntime::ToOrtStatus(status);
+  API_IMPL_END
+}
+
 ORT_API_STATUS_IMPL(OrtApis::AddInitializer, _Inout_ OrtSessionOptions* options, _In_z_ const char* name,
                     _In_ const OrtValue* val) {
+  API_IMPL_BEGIN
   auto st = options->value.AddInitializer(name, val);
   if (!st.IsOK()) {
     return onnxruntime::ToOrtStatus(st);
   }
   return nullptr;
+  API_IMPL_END
+}
+
+ORT_API_STATUS_IMPL(OrtApis::AddExternalInitializers, _In_ OrtSessionOptions* options,
+                    _In_reads_(initializers_num) const char* const* initializer_names,
+                    _In_reads_(initializers_num) const OrtValue* const* initializers, size_t initializers_num) {
+#if !defined(ORT_MINIMAL_BUILD) && !defined(DISABLE_EXTERNAL_INITIALIZERS)
+  API_IMPL_BEGIN
+  onnxruntime::InlinedVector<std::string> names;
+  onnxruntime::InlinedVector<OrtValue> values;
+  names.reserve(initializers_num);
+  values.reserve(initializers_num);
+  for (size_t i = 0; i < initializers_num; ++i) {
+    if (initializer_names[i] == nullptr || initializers[i] == nullptr) {
+      auto message = onnxruntime::MakeString("Input index: ", i, " contains null pointers");
+      return OrtApis::CreateStatus(ORT_INVALID_ARGUMENT, message.c_str());
+    }
+    names.emplace_back(initializer_names[i]);
+    values.emplace_back(*initializers[i]);
+  }
+
+  auto st = options->value.AddExternalInitializers(names, values);
+  if (!st.IsOK()) {
+    return onnxruntime::ToOrtStatus(st);
+  }
+  return nullptr;
+  API_IMPL_END
+#else
+  ORT_UNUSED_PARAMETER(options);
+  ORT_UNUSED_PARAMETER(initializer_names);
+  ORT_UNUSED_PARAMETER(initializers);
+  ORT_UNUSED_PARAMETER(initializers_num);
+  return OrtApis::CreateStatus(ORT_NOT_IMPLEMENTED, "External initializers are not supported in this build");
+#endif
+}
+
+ORT_API_STATUS_IMPL(OrtApis::AddExternalInitializersFromFilesInMemory, _In_ OrtSessionOptions* options,
+                    _In_reads_(num_external_initializer_files) const ORTCHAR_T* const* file_names,
+                    _In_reads_(num_external_initializer_files) char* const* buffer_array,
+                    _In_reads_(num_external_initializer_files) const size_t* file_lengths,
+                    size_t num_external_initializer_files) {
+#if !defined(ORT_MINIMAL_BUILD) && !defined(DISABLE_EXTERNAL_INITIALIZERS)
+  API_IMPL_BEGIN
+  onnxruntime::InlinedVector<onnxruntime::PathString> names;
+  onnxruntime::InlinedVector<std::pair<char*, const size_t>> buffers;
+  onnxruntime::InlinedVector<size_t> lengths;
+  names.reserve(num_external_initializer_files);
+  buffers.reserve(num_external_initializer_files);
+  lengths.reserve(num_external_initializer_files);
+  for (size_t i = 0; i < num_external_initializer_files; ++i) {
+    if (file_names[i] == nullptr || buffer_array[i] == nullptr) {
+      auto message = onnxruntime::MakeString("Input index: ", i, " contains null pointers");
+      return OrtApis::CreateStatus(ORT_INVALID_ARGUMENT, message.c_str());
+    }
+    names.emplace_back(file_names[i]);
+    buffers.emplace_back(std::make_pair(buffer_array[i], file_lengths[i]));
+  }
+
+  auto st = options->value.AddExternalInitializersFromFilesInMemory(names, buffers);
+  if (!st.IsOK()) {
+    return onnxruntime::ToOrtStatus(st);
+  }
+  return nullptr;
+  API_IMPL_END
+#else
+  ORT_UNUSED_PARAMETER(options);
+  ORT_UNUSED_PARAMETER(file_names);
+  ORT_UNUSED_PARAMETER(buffer_array);
+  ORT_UNUSED_PARAMETER(file_lengths);
+  ORT_UNUSED_PARAMETER(num_external_initializer_files);
+  return OrtApis::CreateStatus(ORT_NOT_IMPLEMENTED,
+                               "AddExternalInitializersFromFilesInMemory is not supported in this build");
+#endif
+}
+
+ORT_API_STATUS_IMPL(OrtApis::SetDeterministicCompute, _Inout_ OrtSessionOptions* options, bool value) {
+  API_IMPL_BEGIN
+  options->value.use_deterministic_compute = value;
+  return nullptr;
+  API_IMPL_END
+}
+
+ORT_API_STATUS_IMPL(OrtApis::SessionOptionsSetEpSelectionPolicy, _In_ OrtSessionOptions* options,
+                    _In_ OrtExecutionProviderDevicePolicy policy) {
+  API_IMPL_BEGIN
+  options->value.ep_selection_policy.enable = true;
+  options->value.ep_selection_policy.policy = policy;
+  options->value.ep_selection_policy.delegate = nullptr;
+  options->value.ep_selection_policy.state = nullptr;
+  return nullptr;
+  API_IMPL_END
+}
+
+ORT_API_STATUS_IMPL(OrtApis::SessionOptionsSetEpSelectionPolicyDelegate, _In_ OrtSessionOptions* options,
+                    _In_opt_ EpSelectionDelegate delegate,
+                    _In_opt_ void* state) {
+  API_IMPL_BEGIN
+  options->value.ep_selection_policy.enable = true;
+  options->value.ep_selection_policy.policy = OrtExecutionProviderDevicePolicy_DEFAULT;
+  options->value.ep_selection_policy.delegate = delegate;
+  options->value.ep_selection_policy.state = state;
+  return nullptr;
+  API_IMPL_END
+}
+
+ORT_API_STATUS_IMPL(OrtApis::SessionOptionsSetLoadCancellationFlag, _Inout_ OrtSessionOptions* options,
+                    _In_ bool is_cancel) {
+  API_IMPL_BEGIN
+  options->value.SetLoadCancellationFlag(is_cancel);
+  return nullptr;
+  API_IMPL_END
 }

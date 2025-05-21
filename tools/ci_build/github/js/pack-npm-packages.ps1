@@ -1,15 +1,15 @@
 # Copyright (c) Microsoft Corporation. All rights reserved.
 # Licensed under the MIT License.
 
-# This script makes NPM packages for onnxruntime-common and onnxruntime-(node|web)
+# This script makes NPM packages for onnxruntime-common and onnxruntime-(node|web|react-native)
 #
 # Release Mode (release):
 #   Do not update version number. Version number should be matching $(ORT_ROOT)/VERSION_NUMBER
-#   Always generate packages for onnxruntime-common and onnxruntime-(node|web)
+#   Always generate packages for onnxruntime-common and onnxruntime-(node|web|react-native)
 #
 # Release Candidate Mode (rc):
 #   Update version number to {VERSION_BASE}-rc.{YYYYMMDD}-{COMMIT}
-#   Always generate packages for onnxruntime-common and onnxruntime-(node|web)
+#   Always generate packages for onnxruntime-common and onnxruntime-(node|web|react-native)
 #
 # Dev Mode (dev):
 #   Compare current content with latest @dev package for onnxruntime-common. If no change, we
@@ -19,19 +19,30 @@
 #
 # Custom Mode:
 #   Use first commandline parameter as version number suffix.
-#   Always generate packages for onnxruntime-common and onnxruntime-(node|web)
+#   Always generate packages for onnxruntime-common and onnxruntime-(node|web|react-native)
 #
 
-if ($Args.Count -ne 3) {
-    throw "This script requires 3 arguments, but got $($Args.Count)"
+if ($Args.Count -lt 3) {
+    throw "This script requires at least 3 arguments, but got $($Args.Count)"
 }
 $MODE=$Args[0] # "dev" or "release" or "rc"; otherwise it is considered as a version number
 $ORT_ROOT=$Args[1] # eg. D:\source\onnxruntime
-$TARGET=$Args[2] # "node" or "web"
+$TARGET=$Args[2] # "node" or "web" or "react_native"
+
+if ($TARGET -ne "node" -and $TARGET -ne "web" -and $TARGET -ne "react_native") {
+    throw "Invalid target: $TARGET. Must be one of 'node', 'web' or 'react_native'"
+}
+if ($TARGET -ne "node" -and $Args.Count -gt 3) {
+    throw "Invalid argument count: $($Args.Count). Only 3 arguments are allowed for target '$TARGET'"
+}
+$VERSION_CANDIDATES=$Args[3] # optional, only for node target
+if ($TARGET -eq "node" -and $Args.Count -gt 4) {
+    throw "Invalid argument count: $($Args.Count). Only 4 arguments are allowed for target '$TARGET'"
+}
 
 Function Generate-Package-Version-Number {
     pushd $ORT_ROOT
-    $version_base=Get-Content .\VERSION_NUMBER
+    $version_base=Get-Content ./VERSION_NUMBER
     $version_timestamp=git show -s --format=%ct HEAD
     $version_commit=git rev-parse HEAD
     $version_commit_short=git rev-parse --short HEAD
@@ -51,8 +62,8 @@ Function Generate-Package-Version-Number {
     return @{ version = $version_number; commit = $version_commit }
 }
 
-$JS_COMMON_DIR="$ORT_ROOT\js\common"
-$JS_TARGET_DIR="$ORT_ROOT\js\$TARGET"
+$JS_COMMON_DIR=Join-Path -Path "$ORT_ROOT" -ChildPath "js/common"
+$JS_TARGET_DIR=Join-Path -Path "$ORT_ROOT" -ChildPath "js/$TARGET"
 
 if ($MODE -eq "dev") {
     # For @dev builds, we compares the following 2 package versions for onnxruntime-common:
@@ -60,8 +71,8 @@ if ($MODE -eq "dev") {
     # - 'latest': the latest @dev version from npm.js repository.
     #
     # If the contents of the 2 versions are identical, we don't publish a new version. Instead,
-    # we only publish onnxruntime-node/onnxruntime-web and set its dependency's version to the
-    # 'latest'.
+    # we only publish onnxruntime-node/onnxruntime-web/onnxruntime-react-native and
+    # set its dependency's version to the 'latest'.
 
     # check latest @dev version
     Write-Host "Start checking version for onnxruntime-common@dev"
@@ -73,7 +84,7 @@ if ($MODE -eq "dev") {
 
     # download package latest@dev
     Invoke-WebRequest $ort_common_latest_dist_tarball -OutFile ./latest.tgz
-    if ($(Get-FileHash -Algorithm SHA1 .\latest.tgz).Hash -ne "$ort_common_latest_dist_shasum") {
+    if ($(Get-FileHash -Algorithm SHA1 ./latest.tgz).Hash -ne "$ort_common_latest_dist_shasum") {
         throw "SHASUM mismatch"
     }
     Write-Host "Tarball downloaded"
@@ -83,12 +94,17 @@ if ($MODE -eq "dev") {
 
     # make package for latest
     pushd $JS_COMMON_DIR
-    npm version $ort_common_latest_version
+    npm version --allow-same-version $ort_common_latest_version
     echo $($version_number.commit) | Out-File -Encoding ascii -NoNewline -FilePath ./__commit.txt
+    # update version.ts of common
+    pushd ..
+    npm run update-version common
+    npm run format
+    popd
     npm pack
     popd
 
-    $current_tgz_compare_only="$JS_COMMON_DIR\onnxruntime-common-$ort_common_latest_version.tgz"
+    $current_tgz_compare_only=Join-Path -Path "$JS_COMMON_DIR" -ChildPath "onnxruntime-common-$ort_common_latest_version.tgz"
     if (!(Test-Path $current_tgz_compare_only)) {
         throw "File is not generated: $current_tgz_compare_only"
     }
@@ -114,21 +130,27 @@ if ($MODE -eq "dev") {
     npm install "dir-compare-cli@1.0.1" "json-diff@0.5.4"
 
     Write-Host "Compare package.json"
-    npx json-diff ..\latest\package\package.json ..\current\package\package.json
+    $latest_package_json=Join-Path -Path ".." -ChildPath "latest/package/package.json"
+    $current_package_json=Join-Path -Path ".." -ChildPath "current/package/package.json"
+    npx json-diff $latest_package_json $current_package_json
     $use_latest=$?
     Write-Host "Result: $use_latest"
     if ($use_latest) {
         # package.json matches. now check package contents.
 
         # do not compare commit number
-        if (test-path ../latest/package/__commit.txt) { rm ../latest/package/__commit.txt }
-        if (test-path ../current/package/__commit.txt) { rm ../current/package/__commit.txt }
+        $latest_package_commit=Join-Path -Path ".." -ChildPath "latest/package/__commit.txt"
+        $current_package_commit=Join-Path -Path ".." -ChildPath "current/package/__commit.txt"
+        if (test-path $latest_package_commit) { rm $latest_package_commit }
+        if (test-path $current_package_commit) { rm $current_package_commit }
         # skip package.json, we already checked them
-        rm ../latest/package/package.json
-        rm ../current/package/package.json
+        rm $latest_package_json
+        rm $current_package_json
 
         Write-Host "Compare package contents"
-        npx dircompare -c ../latest/package/ ../current/package/
+        $latest_package_dir=Join-Path -Path ".." -ChildPath "latest/package"
+        $current_package_dir=Join-Path -Path ".." -ChildPath "current/package"
+        npx dircompare -c $latest_package_dir $current_package_dir
         $use_latest=$?
         Write-Host "Result: $use_latest"
     }
@@ -139,16 +161,30 @@ if ($MODE -eq "dev") {
         Write-Host "Need update to onnxruntime-common@dev"
         # need to publish a new version for onnxruntime-common
         pushd $JS_COMMON_DIR
-        npm version $($version_number.version)
+        npm version --allow-same-version $($version_number.version)
         # file __commit.txt is already generated
+
+        # update version.ts of common
+        pushd ..
+        npm run update-version common
+        npm run format
+        popd
+
         npm pack
         popd
     }
 
     # make package for target
     pushd $JS_TARGET_DIR
-    npm version $($version_number.version)
+    npm version --allow-same-version $($version_number.version)
     echo $($version_number.commit) | Out-File -Encoding ascii -NoNewline -FilePath ./__commit.txt
+
+    # update version.ts of TARGET
+    pushd ..
+    npm run update-version $TARGET $VERSION_CANDIDATES
+    npm run format
+    popd
+
     npm pack
     popd
 } elseif ($MODE -eq "release") {
@@ -164,12 +200,26 @@ if ($MODE -eq "dev") {
     $version_number=Generate-Package-Version-Number
 
     pushd $JS_COMMON_DIR
-    npm version $($version_number.version)
+    npm version --allow-same-version $($version_number.version)
+
+    # update version.ts of common
+    pushd ..
+    npm run update-version common
+    npm run format
+    popd
+
     npm pack
     popd
 
     pushd $JS_TARGET_DIR
-    npm version $($version_number.version)
+    npm version --allow-same-version $($version_number.version)
+
+    # update version.ts of TARGET
+    pushd ..
+    npm run update-version $TARGET
+    npm run format
+    popd
+
     npm pack
     popd
 }

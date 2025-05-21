@@ -1,8 +1,11 @@
 // Copyright (c) Microsoft Corporation. All rights reserved.
 // Licensed under the MIT License.
 
+#include "core/session/onnxruntime_session_options_config_keys.h"
 #include "gtest/gtest.h"
 #include "test/providers/provider_test_utils.h"
+#include "test/util/include/default_providers.h"
+#include "test/common/tensor_op_test_utils.h"
 
 namespace onnxruntime {
 namespace test {
@@ -22,17 +25,35 @@ void RunSliceTest(const std::vector<int64_t>& input_dims,
                   const std::unordered_set<std::string>& excluded_providers_input = {}) {
   std::unordered_set<std::string> excluded_providers;
 
-  if (!v10_only)
+  if (!v10_only) {
+    // OpenVINO EP: Disabled temporarily
     excluded_providers = {kTensorrtExecutionProvider, kOpenVINOExecutionProvider};
-  else
+  } else {
     excluded_providers = {kTensorrtExecutionProvider};
+  }
 
   // merge with the excluded ep from input
   excluded_providers.insert(excluded_providers_input.cbegin(), excluded_providers_input.cend());
 
   // NNAPI EP does not support empty output
+  // VSINPU EP does not support empty output
   if (std::any_of(output_dims.cbegin(), output_dims.cend(), [](int64_t i) { return i == 0; })) {
     excluded_providers.insert(kNnapiExecutionProvider);
+    excluded_providers.insert(kVSINPUExecutionProvider);
+  }
+
+  // TODO: ORT behavior when step < 0 and end = INT_MAX is wrong. Fix it and
+  // remove the onnx_shape_disagreement code below.
+  // https://github.com/microsoft/onnxruntime/issues/11107
+  const bool onnx_shape_disagreement = (!steps.empty() && steps[0] < 0 && !ends.empty() &&
+                                        (ends[0] == std::numeric_limits<int64_t>::max() ||
+                                         ends[0] == std::numeric_limits<int32_t>::max()));
+  // ignore the above-mentioned disagreement.
+  SessionOptions so;
+  ASSERT_STATUS_OK(so.config_options.AddConfigEntry(kOrtSessionOptionsConfigStrictShapeTypeInference, "0"));
+
+  if (onnx_shape_disagreement) {
+    excluded_providers.insert(kCoreMLExecutionProvider);
   }
 
   if (!v10_only) {
@@ -43,7 +64,11 @@ void RunSliceTest(const std::vector<int64_t>& input_dims,
       testv9.AddAttribute("axes", axes);
     testv9.AddInput<T>("data", input_dims, input_vals);
     testv9.AddOutput<T>("output", output_dims, output_vals);
-    testv9.Run(OpTester::ExpectResult::kExpectSuccess, "", excluded_providers);  // OpenVINO EP: Disabled temporarily
+    if (onnx_shape_disagreement) {
+      testv9.Run(so, OpTester::ExpectResult::kExpectSuccess, "", excluded_providers);
+    } else {
+      testv9.Run(OpTester::ExpectResult::kExpectSuccess, "", excluded_providers);
+    }
   }
 
   // V10
@@ -57,12 +82,16 @@ void RunSliceTest(const std::vector<int64_t>& input_dims,
     if (steps.size() != 0)
       testv10.AddInput<int64_t>("steps", {static_cast<int64_t>(steps.size())}, steps, only_data_not_initializer);
     testv10.AddOutput<T>("output", output_dims, output_vals);
-    testv10.Run(OpTester::ExpectResult::kExpectSuccess, "", excluded_providers);
+    if (onnx_shape_disagreement) {
+      testv10.Run(so, OpTester::ExpectResult::kExpectSuccess, "", excluded_providers);
+    } else {
+      testv10.Run(OpTester::ExpectResult::kExpectSuccess, "", excluded_providers);
+    }
   };
 
   run_test(false);
 
-  // NNAPI EP requires the starts/ends/axes/steps be initializers
+  // EPs like NNAPI and CoreML require the starts/ends/axes/steps be initializers
   run_test(true);
 }
 
@@ -235,16 +264,41 @@ TEST(SliceTest, Slice3D) {
                        332.0f, 333.0f});
 }
 
-TEST(SliceTest, Slice1D_Int) {
-  RunSliceTest<int32_t>({6},
-                        {0L, 1L, 2L, 3L, 4L, 5L},
-                        {2},
-                        {4},
-                        {0},
-                        {},
-                        {2},
-                        {2L, 3L});
+template <typename T>
+static void TestSlice1DIntData() {
+  // static_assert(std::is_integral_v<TInt>);
+  RunSliceTest<T>({6},
+                  GetTypedArray<T>({0.f, 1.f, 2.f, 3.f, 4.f, 5.f}),
+                  {2},
+                  {4},
+                  {0},
+                  {},
+                  {2},
+                  GetTypedArray<T>({2.f, 3.f}));
 }
+
+TEST(SliceTest, Slice1D_Int32) {
+  TestSlice1DIntData<int32_t>();
+}
+
+TEST(SliceTest, Slice1D_Int64) {
+  TestSlice1DIntData<int64_t>();
+}
+
+TEST(SliceTest, Slice1D_Float) {
+  TestSlice1DIntData<float>();
+}
+
+TEST(SliceTest, Slice1D_Float16) {
+  TestSlice1DIntData<MLFloat16>();
+}
+
+template <typename T>
+class SliceTest : public ::testing::Test {
+};
+
+using SliceTestTypes = ::testing::Types<float, MLFloat16>;
+TYPED_TEST_SUITE(SliceTest, SliceTestTypes);
 
 TEST(SliceTest, Slice1D_String) {
   RunSliceTest<std::string>({6},
@@ -258,16 +312,16 @@ TEST(SliceTest, Slice1D_String) {
 }
 
 // Only Slice V10 can run the following tests
-TEST(SliceTest, Slice1D_WithPositiveSteps) {
-  RunSliceTest<float>({6},
-                      {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f},
-                      {0},
-                      {6},
-                      {0},
-                      {2},
-                      {3},
-                      {0.0f, 2.0f, 4.0f},
-                      true);
+TYPED_TEST(SliceTest, Slice1D_WithPositiveSteps) {
+  RunSliceTest<TypeParam>({6},
+                          GetTypedArray<TypeParam>({0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f}),
+                          {0},
+                          {6},
+                          {0},
+                          {2},
+                          {3},
+                          GetTypedArray<TypeParam>({0.0f, 2.0f, 4.0f}),
+                          true);
 }
 
 // In numpy:
@@ -298,6 +352,9 @@ TEST(SliceTest, Slice1D_WithNegativeSteps_EndOutOfBounds_1) {
 }
 
 TEST(SliceTest, Slice1D_WithNegativeSteps_EndOutOfBounds_2) {
+  if (DefaultWebGpuExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Not covered by WebGPU test suite";
+  }
   RunSliceTest<float>({6},
                       {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f},
                       {0},
@@ -475,6 +532,17 @@ TEST(SliceTest, Slice3D_WithPositiveAndNegativeSteps_SubsetOfAxes_2) {
 // With numeric_limit_max, it means slice to the end of a dimension
 // (whichever direction we are stepping)
 TEST(SliceTest, Slice1D_ReverseAllAxes_1) {
+  // TODO: Unskip when fixed #41968513
+  if (DefaultDmlExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: Expected output shape [{2,2}] did not match run output shape [{0,0}] for output";
+  }
+  if (DefaultVSINPUExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: Expected output shape [{4}] did not match run output shape [{0}] for output";
+  }
+  if (DefaultWebGpuExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Not covered by WebGPU test suite";
+  }
+
   RunSliceTest<float>({4},
                       {1.0f, 2.0f, 3.0f, 4.0f},
                       {-1},
@@ -488,6 +556,9 @@ TEST(SliceTest, Slice1D_ReverseAllAxes_1) {
 
 // With numeric_limit_min, the end value should be clamped to -1
 TEST(SliceTest, Slice1D_ReverseAllAxes_2) {
+  if (DefaultWebGpuExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Not covered by WebGPU test suite";
+  }
   RunSliceTest<float>({4},
                       {1.0f, 2.0f, 3.0f, 4.0f},
                       {-1},
@@ -501,6 +572,9 @@ TEST(SliceTest, Slice1D_ReverseAllAxes_2) {
 
 // giving an end value < -{dim_value} should also clamp it to -1
 TEST(SliceTest, Slice1D_ReverseAllAxes_3) {
+  if (DefaultWebGpuExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Not covered by WebGPU test suite";
+  }
   RunSliceTest<float>({4},
                       {1.0f, 2.0f, 3.0f, 4.0f},
                       {-1},
@@ -513,10 +587,18 @@ TEST(SliceTest, Slice1D_ReverseAllAxes_3) {
 }
 
 TEST(SliceTest, Slice2D_ReverseAllAxes) {
+  // TODO: Unskip when fixed #41968513
+  if (DefaultDmlExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: Expected output shape [{4}] did not match run output shape [{0}] for output";
+  }
+  if (DefaultWebGpuExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Not covered by WebGPU test suite";
+  }
+
   RunSliceTest<float>({2, 2},
                       {1.0f, 2.0f, 3.0f, 4.0f},
                       {-1, -1},
-                      {std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::max()},
+                      {std::numeric_limits<int64_t>::min(), std::numeric_limits<int64_t>::min()},
                       {0, 1},
                       {-1, -1},
                       {2, 2},
@@ -525,10 +607,18 @@ TEST(SliceTest, Slice2D_ReverseAllAxes) {
 }
 
 TEST(SliceTest, Slice2D_ReverseSubsetOfAxes_1) {
+  // TODO: Unskip when fixed #41968513
+  if (DefaultDmlExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: MLOperatorAuthorImpl.cpp(2100): The parameter is incorrect.";
+  }
+  if (DefaultWebGpuExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Not covered by WebGPU test suite";
+  }
+
   RunSliceTest<float>({2, 2},
                       {1.0f, 2.0f, 3.0f, 4.0f},
                       {-1},
-                      {std::numeric_limits<int64_t>::max()},
+                      {std::numeric_limits<int64_t>::min()},
                       {1},  // axis = 1 only
                       {-1},
                       {2, 2},
@@ -537,10 +627,18 @@ TEST(SliceTest, Slice2D_ReverseSubsetOfAxes_1) {
 }
 
 TEST(SliceTest, Slice2D_ReverseSubsetOfAxes_2) {
+  // TODO: Unskip when fixed #41968513
+  if (DefaultDmlExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: Expected output shape [{2,2}] did not match run output shape [{0,2}] for output";
+  }
+  if (DefaultWebGpuExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Not covered by WebGPU test suite";
+  }
+
   RunSliceTest<float>({2, 2},
                       {1.0f, 2.0f, 3.0f, 4.0f},
                       {-1},
-                      {std::numeric_limits<int64_t>::max()},  // end of dimension
+                      {std::numeric_limits<int64_t>::min()},  // end of dimension
                       {0},                                    // axis = 0 only
                       {-1},
                       {2, 2},
@@ -562,6 +660,11 @@ TEST(SliceTest, Slice2D_ImplicitCopyBySlicingADimensionFully) {
 }
 
 TEST(SliceTest, OptionalAxesInputAloneMissing) {
+  // TODO: Unskip when fixed #41968513
+  if (DefaultDmlExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: MLOperatorAuthorImpl.cpp(2068): The parameter is incorrect.";
+  }
+
   std::vector<int64_t> input_dims = {6};
   auto input_vals = {0.0f, 1.0f, 2.0f, 3.0f, 4.0f, 5.0f};
   std::initializer_list<int64_t> starts = {2};
@@ -581,10 +684,18 @@ TEST(SliceTest, OptionalAxesInputAloneMissing) {
 }
 
 TEST(SliceTest, Slice2D_ReverseSubsetOfNegAxes_1) {
+  // TODO: Unskip when fixed #41968513
+  if (DefaultDmlExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Skipping because of the following error: Expected output shape [{2,2}] did not match run output shape [{2,0}] for output";
+  }
+  if (DefaultWebGpuExecutionProvider().get() != nullptr) {
+    GTEST_SKIP() << "Not covered by WebGPU test suite";
+  }
+
   RunSliceTest<float>({2, 2},
                       {1.0f, 2.0f, 3.0f, 4.0f},
                       {-1},
-                      {std::numeric_limits<int64_t>::max()},
+                      {std::numeric_limits<int64_t>::min()},
                       {-1},  // axis = -1 only
                       {-1},
                       {2, 2},
@@ -626,8 +737,38 @@ TEST(SliceTest, Slice5D_LargeStep) {
                       {1.f, 2.f, 3.f, 4.f,
                        5.f, 6.f, 7.f, 8.f},
                       true,
-                      // Nuphar EP cannot handle large steps, TODO, add step clamp to Nuphar EP
-                      {kNupharExecutionProvider});
+                      {});
+}
+
+TEST(SliceTest, Slice5D_CopyAxis2LargeBlock) {
+  // We are trying to accomplish two things
+  // 1) we still need to copy multiple slices because of the axis 1 (slices 0,1)
+  // 2) we are combining axis 2 slices(1,2) in one copy because its step is 1 and
+  //    dims below it are copied as a whole
+  RunSliceTest<float>({1, 3, 4, 2, 2},
+                      {1.f, 2.f, 3.f, 4.f,
+                       5.f, 6.f, 7.f, 8.f,
+                       -1.f, -2.f, -3.f, -4.f,
+                       -5.f, -6.f, -7.f, -8.f,
+                       1.f, 2.f, 3.f, 4.f,
+                       5.f, 6.f, 7.f, 8.f,
+                       -1.f, -2.f, -3.f, -4.f,
+                       -5.f, -6.f, -7.f, -8.f,
+                       1.f, 2.f, 3.f, 4.f,
+                       5.f, 6.f, 7.f, 8.f,
+                       -1.f, -2.f, -3.f, -4.f,
+                       -5.f, -6.f, -7.f, -8.f},
+                      {0, 1},  // starts
+                      {2, 3},  // ends
+                      {1, 2},  // axis
+                      {},      // steps defaults to 1
+                      {1, 2, 2, 2, 2},
+                      {5.f, 6.f, 7.f, 8.f,
+                       -1.f, -2.f, -3.f, -4.f,
+                       5.f, 6.f, 7.f, 8.f,
+                       -1.f, -2.f, -3.f, -4.f},
+                      true,
+                      {});
 }
 
 TEST(SliceTest, EmptyDim) {
@@ -649,5 +790,21 @@ TEST(SliceTest, EmptyDim) {
                       {0, 6},
                       {});
 }
+
+TEST(SliceTest, CoalesceDims) {
+  RunSliceTest<float>({2, 2, 2, 2},
+                      {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f, -1.f, -2.f, -3.f, -4.f, -5.f, -6.f, -7.f, -8.f}, {1, 1},
+                      {0, 2}, {0, 1}, {-1, 1}, {1, 1, 2, 2}, {-5.f, -6.f, -7.f, -8.f}, true);
+  RunSliceTest<float>({1, 2, 2, 2, 2},
+                      {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f, -1.f, -2.f, -3.f, -4.f, -5.f, -6.f, -7.f, -8.f}, {1},
+                      {std::numeric_limits<int64_t>::max()}, {2}, {}, {1, 2, 1, 2, 2},
+                      {5.f, 6.f, 7.f, 8.f, -5.f, -6.f, -7.f, -8.f}, true);
+  RunSliceTest<float>({1, 2, 2, 2, 2},
+                      {1.f, 2.f, 3.f, 4.f, 5.f, 6.f, 7.f, 8.f, -1.f, -2.f, -3.f, -4.f, -5.f, -6.f, -7.f, -8.f}, {1, 1},
+                      {std::numeric_limits<int64_t>::max(), std::numeric_limits<int64_t>::max()}, {1, 3}, {},
+                      {1, 1, 2, 1, 2}, {-3.f, -4.f, -7.f, -8.f}, true);
+  RunSliceTest<float>({1, 1, 1}, {1.f}, {0}, {std::numeric_limits<int64_t>::max()}, {1}, {}, {1, 1, 1}, {1.f}, true);
+}
+
 }  // namespace test
 }  // namespace onnxruntime

@@ -50,7 +50,7 @@ __global__ void _ElementWiseWithStrideTwo(
     if (id < N / 2) {
       CUDA_LONG lhs_index = (lhs_need_compute ? 0 : id);
       CUDA_LONG rhs_index = (rhs_need_compute ? 0 : id);
-      // compute indexes with broadcasting rules: https://github.com/onnx/onnx/blob/master/docs/Broadcasting.md
+      // compute indexes with broadcasting rules: https://github.com/onnx/onnx/blob/main/docs/Broadcasting.md
       CUDA_LONG offset = id;
 #pragma unroll
       for (auto dim = 0; dim < fdm_output_strides.Capacity(); dim++) {
@@ -97,8 +97,8 @@ void ComplexMul_Impl(
     const TArray<int64_t>* rhs_padded_strides,
     const T* rhs_data,
     const TArray<onnxruntime::cuda::fast_divmod>* fdm_output_strides,
-    const onnxruntime::cuda::fast_divmod& fdm_H,
-    const onnxruntime::cuda::fast_divmod& fdm_C,
+    const onnxruntime::cuda::fast_divmod& /*fdm_H*/,
+    const onnxruntime::cuda::fast_divmod& /*fdm_C*/,
     T* output_data,
     int64_t count,
     int64_t lhs_size,

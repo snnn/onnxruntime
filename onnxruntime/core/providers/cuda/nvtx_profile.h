@@ -45,8 +45,7 @@ enum class Color : uint32_t {
 class RangeCreatorBase {
  public:
   RangeCreatorBase(const std::string message, const Color color)
-      : message_(message), color_(color),
-        is_begin_called_(false), is_end_called_(false) {};
+      : message_(message), color_(color), is_begin_called_(false), is_end_called_(false) {};
 
   // Check if Begin and End are both called.
   // It's pointless if not all of them are called.
@@ -77,7 +76,7 @@ class RangeCreatorBase {
 
   bool IsBeginCalled() const {
     return is_begin_called_;
-  } 
+  }
 
   bool IsEndCalled() const {
     return is_end_called_;

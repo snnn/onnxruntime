@@ -84,7 +84,7 @@ class IfOpTester : public OpTester {
         *split_attribute->Add() = 1;  // split "unevenly" to create different shapes across the "then" and "else" branches
         *split_attribute->Add() = 2;
 
-        split_node.AddAttribute("split", attr_proto);
+        split_node.AddAttributeProto(std::move(attr_proto));
       }
     }
 
@@ -246,10 +246,15 @@ void RunTest(bool condition_value,
     excluded_providers.insert(kTensorrtExecutionProvider);
   }
   if (options.mixed_execution_providers) {
-    // we want the CUDA provider to be first, and the CPU provider second. all except the If should run on
-    // CUDA given that, which creates the scenario where we need to copy to/from CPU to execute the If node correctly.
+    // we want the GPU (CUDA/ROCm) provider to be first, and the CPU provider second. all except the If should run on
+    // GPU given that, which creates the scenario where we need to copy to/from CPU to execute the If node correctly.
     std::vector<std::unique_ptr<IExecutionProvider>> execution_providers;
+#ifdef USE_CUDA
     execution_providers.push_back(DefaultCudaExecutionProvider());
+#endif
+#ifdef USE_ROCM
+    execution_providers.push_back(DefaultRocmExecutionProvider());
+#endif
     execution_providers.push_back(DefaultCpuExecutionProvider());
 
     test.Run(expect_result, failure_message, excluded_providers, nullptr, &execution_providers);
@@ -290,7 +295,7 @@ TEST(If, NoShapeInMainGraph_ShapeInSubgraph_False) {
   RunTest(false, options, false);
 }
 
-#ifdef USE_CUDA
+#if defined(USE_CUDA) || defined(USE_ROCM)
 TEST(If, MixedExecutionProviders) {
   RunOptions options{};
   options.mixed_execution_providers = true;
@@ -311,7 +316,7 @@ TEST(If, MixedExecutionProvidersNoShapeInSubgraph) {
   options.include_dim_values_in_subgraph = false;
   RunTest(true, options);
 }
-#endif  // USE_CUDA
+#endif  // defined(USE_CUDA) || defined(USE_ROCM)
 
 TEST(If, SymbolicShapeInMainGraph_NoShapeInSubgraph_True) {
   RunOptions options;
@@ -382,7 +387,7 @@ class IfOpTesterOnlyConstantNodesInConditionalBranches : public OpTester {
         then_constant_attr_tensor_proto->add_dims(1);
         then_constant_attr_tensor_proto->add_float_data(value);  // Constant value of 10.f
 
-        then_constant_node.AddAttribute("value", then_constant_attr_proto);
+        then_constant_node.AddAttributeProto(std::move(then_constant_attr_proto));
 
         auto status_then = graph_then.Resolve();
         EXPECT_EQ(status_then, Status::OK());
@@ -480,12 +485,6 @@ class IfOpTesterWithOptionalTypeAsOutput : public OpTester {
   }
 
  protected:
-  // Since this test is being written at a time when only opset 15  has been released, we override
-  // IsAllowReleasedONNXOpsetsOnlySetForThisTest() to return `false`to allow this test to run
-  bool IsAllowReleasedONNXOpsetsOnlySetForThisTest() const override {
-    return false;
-  }
-
   void AddNodes(onnxruntime::Graph& graph,
                 std::vector<onnxruntime::NodeArg*>& graph_input_defs,
                 std::vector<onnxruntime::NodeArg*>& graph_output_defs,
@@ -503,11 +502,9 @@ class IfOpTesterWithOptionalTypeAsOutput : public OpTester {
       std::unordered_map<std::string, int> domain_to_version;
       domain_to_version.insert({"", 16});  // Opset 16 model
 
-      // Since this test is being written at a time when only opset 15  has been released, we pass in
-      // 'false' for `allow_released_opset_only` while instantiating Model to allow this test to run
       Model subgraph(then_branch ? "Then_subgraph" : "Else_subgraph", false, ModelMetaData(), PathString(), {},
                      domain_to_version, std::vector<ONNX_NAMESPACE::FunctionProto>{},
-                     DefaultLoggingManager().DefaultLogger(), false);
+                     DefaultLoggingManager().DefaultLogger());
 
       auto& graph = subgraph.MainGraph();
 
@@ -551,7 +548,7 @@ TEST(If, TestIfWithOptionalTypeTensorAsOutput) {
     test.AddInput<bool>("If_input", {1}, {true});
     test.AddOptionalTypeTensorInput<float>("A", {}, nullptr);                            // None
     test.AddOptionalTypeTensorOutput<float>("Y", {}, nullptr);                           // None
-    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});  //TensorRT: opset 16 is not supported yet
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});  // TensorRT: opset 16 is not supported yet
   }
 
   // CASE 2: Optional tensor + non-none
@@ -561,7 +558,7 @@ TEST(If, TestIfWithOptionalTypeTensorAsOutput) {
     std::initializer_list<float> data = {-1.0856307f, 0.99734545f};
     test.AddOptionalTypeTensorInput<float>("A", {2}, &data);                             // Non-None
     test.AddOptionalTypeTensorOutput<float>("Y", {2}, &data);                            // Non-None
-    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});  //TensorRT: opset 16 is not supported yet
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});  // TensorRT: opset 16 is not supported yet
   }
 
   // CASE 3: Optional tensor sequence + none
@@ -570,7 +567,7 @@ TEST(If, TestIfWithOptionalTypeTensorAsOutput) {
     test.AddInput<bool>("If_input", {1}, {true});
     test.AddOptionalTypeSeqInput<float>("A", nullptr);                                   // None
     test.AddOptionalTypeSeqOutput<float>("Y", nullptr);                                  // None
-    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});  //TensorRT: opset 16 is not supported yet
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});  // TensorRT: opset 16 is not supported yet
   }
 
   // CASE 4: Optional tensor sequence + non-none
@@ -585,7 +582,7 @@ TEST(If, TestIfWithOptionalTypeTensorAsOutput) {
 
     test.AddOptionalTypeSeqInput<float>("A", &seq);                                      // Non-None
     test.AddOptionalTypeSeqOutput<float>("Y", &seq);                                     // Non-None
-    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});  //TensorRT: opset 16 is not supported yet
+    test.Run(OpTester::ExpectResult::kExpectSuccess, "", {kTensorrtExecutionProvider});  // TensorRT: opset 16 is not supported yet
   }
 }
 

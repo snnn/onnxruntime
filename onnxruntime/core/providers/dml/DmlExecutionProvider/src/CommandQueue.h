@@ -13,7 +13,7 @@ namespace Dml
     {
     public:
         // Creates a CommandQueue object that wraps an existing D3D12 queue.
-        CommandQueue(ID3D12CommandQueue* existingQueue);
+        CommandQueue(ID3D12CommandQueue* existingQueue, bool cpuSyncSpinningEnabled);
 
         D3D12_COMMAND_LIST_TYPE GetType() const { return m_type; }
         ComPtr<ID3D12Fence> GetFence() const { return m_fence; }
@@ -33,6 +33,17 @@ namespace Dml
         GpuEvent GetNextCompletionEvent();
 
         void QueueReference(IUnknown* object, bool waitForUnsubmittedWork);
+
+#ifdef _GAMING_XBOX
+        void QueueReference(IGraphicsUnknown* object, bool waitForUnsubmittedWork)
+        {
+            // TODO(justoeck): consider changing QueuedReference to hold a variant of
+            // ComPtr<IUnknown>, ComPtr<IGraphicsUnknown>.
+            auto wrapper = Microsoft::WRL::Make<GraphicsUnknownWrapper>(object);
+            QueueReference(wrapper.Get(), waitForUnsubmittedWork);
+        }
+#endif
+
         void Close();
         void ReleaseCompletedReferences();
 
@@ -51,6 +62,7 @@ namespace Dml
         ComPtr<ID3D12Fence> m_fence;
         uint64_t m_lastFenceValue = 0;
         bool m_closing = false;
+        bool m_cpuSyncSpinningEnabled = false;
     };
 
 } // namespace Dml
